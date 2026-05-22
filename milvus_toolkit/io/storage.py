@@ -63,11 +63,11 @@ MilvusStorageAdapter = MilvusStorageReader
 
 def _load_milvus_storage():
     try:
-        import milvus_storage
+        from milvus_toolkit._vendor import milvus_storage
     except ImportError as exc:
         raise StorageError(
-            "milvus-storage is required for StorageV3 reads; run scripts/install_dev.sh "
-            "or build it from upstream Git with python scripts/build_milvus_storage.py"
+            "Bundled milvus_storage is unavailable; run scripts/install_dev.sh "
+            "or install a milvus-toolkit wheel built with python -m build --wheel"
         ) from exc
     return milvus_storage
 

@@ -13,8 +13,10 @@ authors = [
   { name = "Milvus Python Toolkit contributors" }
 ]
 dependencies = [
-  "pyarrow>=14",
-  "milvus-storage @ git+https://github.com/milvus-io/milvus-storage.git@main#subdirectory=python",
+  "pyarrow>=17.0.0",
+  "numpy>=1.20.0",
+  "cffi>=1.17.1",
+  "pandas>=2.3.3",
 ]
 
 [project.optional-dependencies]
@@ -26,11 +28,19 @@ test = [
 [project.scripts]
 milvus-toolkit = "milvus_toolkit.cli.main:main"
 
-[tool.hatch.metadata]
-allow-direct-references = true
+[tool.hatch.build.hooks.custom]
+path = "scripts/hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["milvus_toolkit"]
+artifacts = [
+  "third_party/milvus-storage/python/milvus_storage/lib/*.so",
+  "third_party/milvus-storage/python/milvus_storage/lib/*.dylib",
+  "third_party/milvus-storage/python/milvus_storage/lib/*.dll",
+]
+
+[tool.hatch.build.targets.wheel.force-include]
+"third_party/milvus-storage/python/milvus_storage" = "milvus_toolkit/_vendor/milvus_storage"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -38,6 +48,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+extend-exclude = ["third_party"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

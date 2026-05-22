@@ -11,11 +11,14 @@ The current design direction is a Milvus Python Toolkit / Offline SDK rather tha
 ## Commands
 
 ```bash
-# Install package with locally built milvus-storage from upstream Git
+# Install package with internal bundled milvus_storage from the submodule
 scripts/install_dev.sh
 
+# Build the bundled project wheel
+python -m build --wheel
+
 # Fast install for unit tests without building native milvus-storage
-python -m pip install "pyarrow>=14" "pytest>=7" "ruff>=0.4"
+python -m pip install "pyarrow>=17.0.0" "numpy>=1.20.0" "cffi>=1.17.1" "pandas>=2.3.3" "pytest>=7" "ruff>=0.4"
 python -m pip install -e . --no-deps
 
 # Run tests
@@ -97,7 +100,7 @@ ops     -/-> engine-specific SDK unless isolated behind an optional engine path
 cli     -/-> storage internals
 ```
 
-`core/` should not depend on Ray, Daft, Pandas, Polars, DuckDB, or Spark. StorageV3 access, `milvus-storage` API details, and Milvus Lite local storage details should be isolated behind the `io` storage adapter layer. Upper layers should depend on a unified StorageReader/StorageWriter protocol rather than branching on Milvus vs Milvus Lite. `milvus-storage` must be consumed from upstream Git and built with `scripts/build_milvus_storage.py`; do not change it back to a plain PyPI dependency.
+`core/` should not depend on Ray, Daft, Pandas, Polars, DuckDB, or Spark. StorageV3 access, `milvus-storage` API details, and Milvus Lite local storage details should be isolated behind the `io` storage adapter layer. Upper layers should depend on a unified StorageReader/StorageWriter protocol rather than branching on Milvus vs Milvus Lite. `milvus-storage` must be consumed from the `third_party/milvus-storage` Git submodule and bundled into the `milvus-toolkit` wheel under `milvus_toolkit._vendor`; do not change it back to a plain PyPI dependency, direct Git dependency, top-level package, or separately installed `milvus_storage` wheel.
 
 ## Important domain constraints
 

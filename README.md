@@ -10,7 +10,7 @@ snapshot metadata -> read plan -> unified StorageReader -> PyArrow Table -> insp
 
 ## Install for development
 
-`milvus-storage` is built from the upstream Git repository rather than consumed from PyPI. Use the project install script so the native library is compiled and packaged into the local wheel:
+`milvus-storage` is tracked as a Git submodule rather than consumed from PyPI. Use the project install script so the submodule is initialized, the native library is compiled, and `milvus_storage` is bundled inside the `milvus_toolkit._vendor` package:
 
 ```bash
 scripts/install_dev.sh
@@ -24,13 +24,16 @@ sudo apt-get install -y build-essential cmake libaio-dev patchelf
 python -m pip install "conan>=2" "build>=1"
 ```
 
-A Rust toolchain is also required by the upstream native build. To pin a specific upstream revision:
+A Rust toolchain is also required by the upstream native build. To pin a specific upstream revision, checkout the desired commit inside `third_party/milvus-storage`, then commit the parent repository's submodule pointer.
+
+A bare `pip install "git+https://github.com/milvus-io/milvus-storage.git#subdirectory=python"` is not sufficient because it does not run `make -C cpp python-lib` or bundle the native library into the `milvus-toolkit` wheel.
+
+To build the project wheel directly:
 
 ```bash
-MILVUS_STORAGE_REF=<commit-sha> scripts/install_dev.sh
+git submodule update --init --recursive
+python -m build --wheel
 ```
-
-A bare `pip install "git+https://github.com/milvus-io/milvus-storage.git#subdirectory=python"` is not sufficient because it does not run `make -C cpp python-lib` or bundle the native library.
 
 ## Run checks
 
