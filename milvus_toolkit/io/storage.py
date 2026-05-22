@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Protocol
 
 import pyarrow as pa
@@ -42,7 +43,7 @@ class MilvusStorageReader:
                 columns=columns,
                 properties=properties,
             ) as reader:
-                table = reader.scan().read_all()
+                table = _scan_result_to_table(reader.scan())
         except StorageError:
             raise
         except Exception as exc:
@@ -51,10 +52,6 @@ class MilvusStorageReader:
                 f"{task.segment.segment_id} from {task.manifest_path}: {exc}"
             ) from exc
 
-        if not isinstance(table, pa.Table):
-            raise StorageError(
-                "milvus-storage Reader.scan().read_all() must return a pyarrow.Table"
-            )
         return table.select(columns) if columns else table
 
 
@@ -91,6 +88,30 @@ def _storage_properties(storage: StorageConfig) -> dict[str, str]:
     return properties
 
 
+def _scan_result_to_table(scan_result) -> pa.Table:
+    if isinstance(scan_result, pa.Table):
+        return scan_result
+
+    if hasattr(scan_result, "read_all"):
+        table = scan_result.read_all()
+        if isinstance(table, pa.Table):
+            return table
+        raise StorageError(
+            "milvus-storage Reader.scan().read_all() must return a pyarrow.Table, "
+            f"got {type(table).__name__}"
+        )
+
+    if isinstance(scan_result, Iterable):
+        batches = list(scan_result)
+        if all(isinstance(batch, pa.RecordBatch) for batch in batches):
+            return pa.Table.from_batches(batches)
+
+    raise StorageError(
+        "milvus-storage Reader.scan() must return a pyarrow.Table, an object with "
+        f"read_all(), or an iterable of pyarrow.RecordBatch; got {type(scan_result).__name__}"
+    )
+
+
 def _to_pyarrow_schema(fields: tuple[FieldSchema, ...]) -> pa.Schema:
     return pa.schema([_to_pyarrow_field(field) for field in fields])
 
@@ -119,7 +140,9 @@ def _to_pyarrow_type(field: FieldSchema) -> pa.DataType:
         return pa.string()
     if data_type == "floatvector":
         return _float_vector_type(field)
-    raise UnsupportedFeatureError(f"Unsupported Milvus field type: {field.data_type}")
+    raise UnsupportedFeatureError(
+        f"Unsupported Milvus field type for field {field.name}: {field.data_type}"
+    )
 
 
 def _float_vector_type(field: FieldSchema) -> pa.DataType:

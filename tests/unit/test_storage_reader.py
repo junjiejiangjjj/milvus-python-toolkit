@@ -1,10 +1,13 @@
 from types import SimpleNamespace
 
 import pyarrow as pa
+import pytest
 
 from milvus_toolkit.core.plans import SegmentReadTask
+from milvus_toolkit.errors import StorageError, UnsupportedFeatureError
 from milvus_toolkit.io.storage import (
     MilvusStorageReader,
+    _scan_result_to_table,
     _storage_properties,
     _to_pyarrow_schema,
 )
@@ -62,6 +65,45 @@ def test_to_pyarrow_schema_maps_mvp_field_types():
     assert schema.field("id").nullable is False
     assert schema.field("name").type == pa.string()
     assert schema.field("vector").type == pa.list_(pa.float32(), 2)
+
+
+def test_scan_result_to_table_accepts_table():
+    table = pa.table({"id": [1]})
+
+    assert _scan_result_to_table(table) is table
+
+
+def test_scan_result_to_table_accepts_read_all_object():
+    table = pa.table({"id": [1]})
+
+    class FakeBatchReader:
+        def read_all(self):
+            return table
+
+    assert _scan_result_to_table(FakeBatchReader()) is table
+
+
+def test_scan_result_to_table_accepts_record_batch_iterable():
+    schema = pa.schema([pa.field("id", pa.int64())])
+    batches = [pa.RecordBatch.from_pydict({"id": [1, 2]}, schema=schema)]
+
+    table = _scan_result_to_table(batches)
+
+    assert table.to_pydict() == {"id": [1, 2]}
+
+
+def test_scan_result_to_table_rejects_unexpected_read_all_result():
+    class FakeBatchReader:
+        def read_all(self):
+            return "not a table"
+
+    with pytest.raises(StorageError, match="got str"):
+        _scan_result_to_table(FakeBatchReader())
+
+
+def test_to_pyarrow_schema_reports_unsupported_field_name():
+    with pytest.raises(UnsupportedFeatureError, match="payload: JSON"):
+        _to_pyarrow_schema((FieldSchema("payload", 200, "JSON"),))
 
 
 def test_milvus_storage_reader_uses_transaction_manifest_and_reader(monkeypatch):
@@ -161,3 +203,42 @@ def test_milvus_storage_reader_uses_transaction_manifest_and_reader(monkeypatch)
     assert calls["reader"]["columns"] == ["id", "vector"]
     assert calls["reader"]["schema"].field("id").type == pa.int64()
     assert table.to_pydict() == {"id": [1, 2], "vector": [[0.1, 0.2], [0.3, 0.4]]}
+
+
+def test_milvus_storage_reader_wraps_backend_errors(monkeypatch):
+    class FakeTransaction:
+        def __init__(self, path, properties):
+            pass
+
+        def __enter__(self):
+            raise RuntimeError("backend failed")
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    fake_milvus_storage = SimpleNamespace(Transaction=FakeTransaction)
+    monkeypatch.setattr(
+        "milvus_toolkit.io.storage._load_milvus_storage",
+        lambda: fake_milvus_storage,
+    )
+
+    task = SegmentReadTask(
+        segment=SegmentMetadata(
+            segment_id=10,
+            partition_id=1,
+            row_count=2,
+            storage_version="StorageV3",
+            manifest_path="segments/10/manifest.json",
+            manifest_version="v1",
+        ),
+        schema=MilvusSchema(
+            collection_name="demo",
+            fields=(FieldSchema("id", 100, "Int64"),),
+        ),
+        projected_fields=(FieldSchema("id", 100, "Int64"),),
+        include=(),
+        storage=StorageConfig(storage_type="local", root_path="/data/root"),
+    )
+
+    with pytest.raises(StorageError, match="segment 10 from segments/10/manifest.json"):
+        MilvusStorageReader(task.storage).read_segment_table(task)
