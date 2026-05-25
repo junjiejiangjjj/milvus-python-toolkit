@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from milvus_toolkit.core.planner import plan_snapshot_read
-from milvus_toolkit.errors import UnsupportedFeatureError, UnsupportedSegmentError
+from milvus_toolkit.errors import UnsupportedFeatureError
 from milvus_toolkit.io.object_store import load_snapshot_json
 from milvus_toolkit.types import StorageConfig
 
@@ -24,12 +24,15 @@ def test_plan_snapshot_read_storage_v3():
     assert plan.include == ("segment_id", "row_offset")
 
 
-def test_plan_snapshot_read_rejects_non_storage_v3():
-    with pytest.raises(UnsupportedSegmentError):
-        plan_snapshot_read(
-            load_snapshot_json(str(FIXTURES / "snapshot_non_storage_v3.json")),
-            storage=StorageConfig(endpoint="localhost:9000", bucket="bucket"),
-        )
+def test_plan_snapshot_read_keeps_non_storage_v3_engine_neutral():
+    plan = plan_snapshot_read(
+        load_snapshot_json(str(FIXTURES / "snapshot_non_storage_v3.json")),
+        storage=StorageConfig(backend="milvus_lite", root_path="/lite/db"),
+    )
+
+    assert len(plan.tasks) == 1
+    assert plan.tasks[0].segment.segment_id == 20
+    assert plan.tasks[0].segment.storage_version == "PackedParquet"
 
 
 def test_plan_snapshot_read_rejects_unknown_include():

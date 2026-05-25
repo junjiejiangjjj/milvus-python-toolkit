@@ -6,6 +6,7 @@ from typing import Any
 
 @dataclass(frozen=True)
 class StorageConfig:
+    backend: str = "milvus_storage"
     storage_type: str = "local"
     endpoint: str | None = None
     bucket: str | None = None

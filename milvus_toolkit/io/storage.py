@@ -5,6 +5,7 @@ from typing import Protocol
 
 import pyarrow as pa
 
+from milvus_toolkit.core.manifest import validate_storage_v3_manifest
 from milvus_toolkit.core.plans import SegmentReadTask
 from milvus_toolkit.errors import StorageError, UnsupportedFeatureError
 from milvus_toolkit.types import FieldSchema, StorageConfig
@@ -19,7 +20,14 @@ class StorageWriter(Protocol):
 
 
 def create_storage_reader(storage: StorageConfig) -> StorageReader:
-    return MilvusStorageReader(storage)
+    if storage.backend == "milvus_storage":
+        return MilvusStorageReader(storage)
+    if storage.backend == "milvus_lite":
+        return MilvusLiteStorageReader(storage)
+    raise UnsupportedFeatureError(
+        "Unsupported storage backend "
+        f"{storage.backend!r}; expected 'milvus_storage' or 'milvus_lite'"
+    )
 
 
 class MilvusStorageReader:
@@ -27,6 +35,7 @@ class MilvusStorageReader:
         self.storage = storage
 
     def read_segment_table(self, task: SegmentReadTask) -> pa.Table:
+        validate_storage_v3_manifest(task.segment)
         milvus_storage = _load_milvus_storage()
         properties = _storage_properties(task.storage)
         schema = _to_pyarrow_schema(task.projected_fields)
@@ -53,6 +62,21 @@ class MilvusStorageReader:
             ) from exc
 
         return table.select(columns) if columns else table
+
+
+class MilvusLiteStorageReader:
+    def __init__(self, storage: StorageConfig):
+        self.storage = storage
+
+    def read_segment_table(self, task: SegmentReadTask) -> pa.Table:
+        if task.storage.root_path is None and "lite.path" not in task.storage.extra:
+            raise StorageError(
+                "Milvus Lite storage requires StorageConfig.root_path or extra['lite.path']"
+            )
+        raise UnsupportedFeatureError(
+            "Milvus Lite storage reader is not implemented yet; wire the lite-storage "
+            "API inside MilvusLiteStorageReader"
+        )
 
 
 MilvusStorageAdapter = MilvusStorageReader

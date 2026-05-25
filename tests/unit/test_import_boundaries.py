@@ -39,5 +39,5 @@ def test_io_does_not_import_engines():
 def test_milvus_storage_import_is_isolated_to_io():
     for path in (ROOT / "milvus_toolkit").rglob("*.py"):
         source = path.read_text(encoding="utf-8")
-        if "milvus_storage" in source:
+        if "import milvus_storage" in source or "_vendor import milvus_storage" in source:
             assert IO in path.parents, f"{path} references milvus_storage outside io/"

@@ -27,17 +27,27 @@ def test_read_snapshot_returns_dataset_with_plan():
 
 
 def test_read_snapshot_to_arrow_uses_storage_reader_factory(monkeypatch):
-    monkeypatch.setattr(api, "create_storage_reader", lambda storage: FakeStorageReader())
+    factory_calls = []
+
+    def create_fake_reader(storage):
+        factory_calls.append(storage)
+        return FakeStorageReader()
+
+    monkeypatch.setattr(api, "create_storage_reader", create_fake_reader)
+    storage = mt.StorageConfig(
+        backend="milvus_lite", endpoint="localhost:9000", bucket="bucket"
+    )
 
     dataset = mt.read_snapshot(
         str(FIXTURE),
-        storage=mt.StorageConfig(endpoint="localhost:9000", bucket="bucket"),
+        storage=storage,
         columns=["id"],
         include=["segment_id"],
     )
 
     table = dataset.to_arrow()
 
+    assert factory_calls == [storage]
     assert table.column_names == ["id", "segment_id"]
     assert table["id"].to_pylist() == [1, 2]
     assert table["segment_id"].to_pylist() == [10, 10]

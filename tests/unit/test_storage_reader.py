@@ -4,14 +4,62 @@ import pyarrow as pa
 import pytest
 
 from milvus_toolkit.core.plans import SegmentReadTask
-from milvus_toolkit.errors import StorageError, UnsupportedFeatureError
+from milvus_toolkit.errors import (
+    ManifestError,
+    StorageError,
+    UnsupportedFeatureError,
+    UnsupportedSegmentError,
+)
 from milvus_toolkit.io.storage import (
+    MilvusLiteStorageReader,
     MilvusStorageReader,
     _scan_result_to_table,
     _storage_properties,
     _to_pyarrow_schema,
+    create_storage_reader,
 )
 from milvus_toolkit.types import FieldSchema, MilvusSchema, SegmentMetadata, StorageConfig
+
+
+def _segment_read_task(
+    storage: StorageConfig | None = None,
+    storage_version: str | None = "StorageV3",
+    manifest_path: str | None = "segments/10/manifest.json",
+) -> SegmentReadTask:
+    return SegmentReadTask(
+        segment=SegmentMetadata(
+            segment_id=10,
+            partition_id=1,
+            row_count=2,
+            storage_version=storage_version,
+            manifest_path=manifest_path,
+            manifest_version="v1",
+        ),
+        schema=MilvusSchema(
+            collection_name="demo",
+            fields=(FieldSchema("id", 100, "Int64"),),
+        ),
+        projected_fields=(FieldSchema("id", 100, "Int64"),),
+        include=(),
+        storage=storage or StorageConfig(storage_type="local", root_path="/data/root"),
+    )
+
+
+def test_create_storage_reader_dispatches_milvus_storage():
+    reader = create_storage_reader(StorageConfig(backend="milvus_storage"))
+
+    assert isinstance(reader, MilvusStorageReader)
+
+
+def test_create_storage_reader_dispatches_milvus_lite():
+    reader = create_storage_reader(StorageConfig(backend="milvus_lite"))
+
+    assert isinstance(reader, MilvusLiteStorageReader)
+
+
+def test_create_storage_reader_rejects_unknown_backend():
+    with pytest.raises(UnsupportedFeatureError, match="unknown"):
+        create_storage_reader(StorageConfig(backend="unknown"))
 
 
 def test_storage_properties_for_local_storage():
@@ -203,6 +251,52 @@ def test_milvus_storage_reader_uses_transaction_manifest_and_reader(monkeypatch)
     assert calls["reader"]["columns"] == ["id", "vector"]
     assert calls["reader"]["schema"].field("id").type == pa.int64()
     assert table.to_pydict() == {"id": [1, 2], "vector": [[0.1, 0.2], [0.3, 0.4]]}
+
+
+def test_milvus_storage_reader_rejects_non_storage_v3_before_backend(monkeypatch):
+    monkeypatch.setattr(
+        "milvus_toolkit.io.storage._load_milvus_storage",
+        lambda: pytest.fail("milvus-storage backend should not be loaded"),
+    )
+
+    with pytest.raises(UnsupportedSegmentError):
+        MilvusStorageReader(StorageConfig()).read_segment_table(
+            _segment_read_task(storage_version="PackedParquet")
+        )
+
+
+def test_milvus_storage_reader_rejects_missing_manifest_before_backend(monkeypatch):
+    monkeypatch.setattr(
+        "milvus_toolkit.io.storage._load_milvus_storage",
+        lambda: pytest.fail("milvus-storage backend should not be loaded"),
+    )
+
+    with pytest.raises(ManifestError, match="manifest_path"):
+        MilvusStorageReader(StorageConfig()).read_segment_table(
+            _segment_read_task(manifest_path=None)
+        )
+
+
+def test_milvus_lite_reader_does_not_require_storage_v3_manifest():
+    task = _segment_read_task(
+        storage=StorageConfig(backend="milvus_lite", root_path="/lite/db"),
+        storage_version="PackedParquet",
+        manifest_path=None,
+    )
+
+    with pytest.raises(UnsupportedFeatureError, match="Milvus Lite storage reader"):
+        MilvusLiteStorageReader(task.storage).read_segment_table(task)
+
+
+def test_milvus_lite_reader_requires_local_path():
+    task = _segment_read_task(
+        storage=StorageConfig(backend="milvus_lite"),
+        storage_version="PackedParquet",
+        manifest_path=None,
+    )
+
+    with pytest.raises(StorageError, match="root_path"):
+        MilvusLiteStorageReader(task.storage).read_segment_table(task)
 
 
 def test_milvus_storage_reader_wraps_backend_errors(monkeypatch):

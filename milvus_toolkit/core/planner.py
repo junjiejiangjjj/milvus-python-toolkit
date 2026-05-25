@@ -5,7 +5,6 @@ from typing import Any
 from milvus_toolkit.errors import UnsupportedFeatureError
 from milvus_toolkit.types import StorageConfig
 
-from .manifest import validate_storage_v3_manifest
 from .plans import ReadPlan, SegmentReadTask
 from .schema import project_fields
 from .snapshot import SnapshotMetadata, parse_snapshot
@@ -30,7 +29,6 @@ def plan_snapshot_read(
     projected_fields = project_fields(schema, columns)
     tasks = []
     for segment in snapshot_metadata.segments:
-        validate_storage_v3_manifest(segment)
         tasks.append(
             SegmentReadTask(
                 segment=segment,
