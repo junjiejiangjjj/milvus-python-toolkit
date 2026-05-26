@@ -111,10 +111,22 @@ def test_import_native_snapshot_reads_avro_manifest_record(tmp_path, monkeypatch
             {
                 "segment_id": 10,
                 "partition_id": 1,
-                "row_count": 2,
-                "storage_version": "StorageV3",
+                "num_of_rows": 2,
+                "storage_version": 3,
                 "transaction_path": "segments/10",
                 "manifest_version": "v1",
+                "binlog_files": [
+                    {
+                        "field_id": 100,
+                        "binlogs": [
+                            {
+                                "log_id": 1,
+                                "log_path": "segments/10/100/1",
+                                "entries_num": 2,
+                            }
+                        ],
+                    }
+                ],
             }
         ]
 
@@ -133,6 +145,89 @@ def test_import_native_snapshot_reads_avro_manifest_record(tmp_path, monkeypatch
             "manifest_version": "v1",
         }
     ]
+
+
+def test_import_native_snapshot_metadata_overrides_avro_manifest(tmp_path, monkeypatch):
+    metadata = tmp_path / "metadata.json"
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    (manifest_dir / "10.avro").write_bytes(b"fake-avro")
+    metadata.write_text(
+        json.dumps(
+            {
+                "collection_schema": {
+                    "name": "demo_collection",
+                    "fields": [{"name": "id", "field_id": 100, "data_type": "Int64"}],
+                },
+                "segments": [
+                    {
+                        "segment_id": 10,
+                        "row_count": 5,
+                        "storage_version": "StorageV3",
+                        "manifest_path": "10.avro",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    fastavro = ModuleType("fastavro")
+    fastavro.reader = lambda _file: [
+        {
+            "segment_id": 10,
+            "partition_id": 1,
+            "num_of_rows": 2,
+            "storage_version": 3,
+        }
+    ]
+    monkeypatch.setitem(sys.modules, "fastavro", fastavro)
+
+    payload = build_snapshot_payload_from_native_snapshot(metadata, manifest_dir=manifest_dir)
+
+    assert payload["segments"] == [
+        {
+            "segment_id": 10,
+            "partition_id": 1,
+            "row_count": 5,
+            "storage_version": "StorageV3",
+            "manifest_path": str(manifest_dir / "10.avro"),
+            "manifest_version": None,
+        }
+    ]
+
+
+
+def test_import_native_snapshot_rejects_invalid_binlog_files(tmp_path, monkeypatch):
+    metadata = tmp_path / "metadata.json"
+    manifest_dir = tmp_path / "manifests"
+    manifest_dir.mkdir()
+    (manifest_dir / "10.avro").write_bytes(b"fake-avro")
+    metadata.write_text(
+        json.dumps(
+            {
+                "collection_schema": {
+                    "name": "demo_collection",
+                    "fields": [{"name": "id", "field_id": 100, "data_type": "Int64"}],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    fastavro = ModuleType("fastavro")
+    fastavro.reader = lambda _file: [
+        {
+            "segment_id": 10,
+            "partition_id": 1,
+            "num_of_rows": 2,
+            "storage_version": 3,
+            "binlog_files": "broken",
+        }
+    ]
+    monkeypatch.setitem(sys.modules, "fastavro", fastavro)
+
+    with pytest.raises(SnapshotError, match="binlog_files must be a list"):
+        build_snapshot_payload_from_native_snapshot(metadata, manifest_dir=manifest_dir)
+
 
 
 def test_import_native_snapshot_requires_enough_paths():

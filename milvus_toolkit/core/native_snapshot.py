@@ -175,9 +175,9 @@ def _canonical_segment_data(segment: Any, manifest_dir: Path | None) -> dict[str
             _first(combined, "partition_id", "partitionID", "partitionId")
         ),
         "row_count": _optional_int(
-            _first(combined, "row_count", "rowCount", "num_rows", "numRows")
+            _first(combined, "row_count", "rowCount", "num_rows", "numRows", "num_of_rows")
         ),
-        "storage_version": str(storage_version),
+        "storage_version": _storage_version_name(storage_version),
         "manifest_path": str(
             _first(combined, "transaction_path", "transactionPath") or manifest_path
         ),
@@ -228,7 +228,56 @@ def _read_manifest_record(path: Path | None) -> dict[str, Any]:
         return {}
     if not isinstance(records[0], Mapping):
         raise SnapshotError(f"Native snapshot manifest record must be an object: {path}")
-    return dict(records[0])
+    return _normalize_manifest_record(records[0], path)
+
+
+
+def _normalize_manifest_record(record: Mapping[str, Any], path: Path) -> dict[str, Any]:
+    normalized = dict(record)
+    _validate_binlog_files(normalized.get("binlog_files"), path)
+    return normalized
+
+
+
+def _validate_binlog_files(value: Any, path: Path) -> None:
+    if value is None:
+        return
+    if not isinstance(value, list):
+        raise SnapshotError(f"Native snapshot manifest binlog_files must be a list: {path}")
+    for field_binlog in value:
+        if not isinstance(field_binlog, Mapping):
+            raise SnapshotError(
+                f"Native snapshot manifest binlog_files entries must be objects: {path}"
+            )
+        if _first(field_binlog, "field_id", "fieldID", "fieldId") is None:
+            raise SnapshotError(
+                f"Native snapshot manifest binlog_files entries must include field_id: {path}"
+            )
+        binlogs = field_binlog.get("binlogs")
+        if binlogs is None:
+            continue
+        if not isinstance(binlogs, list):
+            raise SnapshotError(
+                f"Native snapshot manifest binlog_files binlogs must be a list: {path}"
+            )
+        for binlog in binlogs:
+            if not isinstance(binlog, Mapping):
+                raise SnapshotError(
+                    f"Native snapshot manifest binlog entries must be objects: {path}"
+                )
+            if _first(binlog, "log_path", "logPath", "path") is None:
+                raise SnapshotError(
+                    f"Native snapshot manifest binlog entries must include log_path: {path}"
+                )
+
+
+
+def _storage_version_name(value: Any) -> str:
+    versions = {
+        3: "StorageV3",
+        "3": "StorageV3",
+    }
+    return versions.get(value, str(value))
 
 
 def _nested(data: Mapping[str, Any], first: str, second: str) -> Any:
