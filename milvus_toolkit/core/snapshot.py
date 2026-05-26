@@ -23,6 +23,22 @@ class SnapshotMetadata:
         )
 
 
+def build_snapshot_payload(
+    schema: dict[str, Any],
+    segments: dict[str, Any] | list[dict[str, Any]],
+    collection_name: str | None = None,
+) -> dict[str, Any]:
+    schema_data = _canonical_schema_data(schema, collection_name)
+    canonical_segments = _canonical_segments_data(segments)
+    payload = {
+        "collection_name": collection_name or schema_data.get("name"),
+        "collection_schema": schema_data,
+        "segments": canonical_segments,
+    }
+    parse_snapshot(payload)
+    return payload
+
+
 def parse_snapshot(data: dict[str, Any]) -> SnapshotMetadata:
     if not isinstance(data, dict):
         raise SnapshotError("Snapshot JSON must be an object")
@@ -92,6 +108,56 @@ def _parse_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
             )
         )
     return segments
+
+
+def _canonical_schema_data(
+    schema: dict[str, Any],
+    collection_name: str | None,
+) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        raise SnapshotError("Snapshot schema input must be an object")
+    schema_data = dict(schema.get("collection_schema", schema))
+    parsed = parse_schema(
+        {"collection_schema": schema_data, "collection_name": collection_name}
+    )
+    return {
+        "name": collection_name or parsed.collection_name,
+        "fields": [
+            {
+                "name": field.name,
+                "field_id": field.field_id,
+                "data_type": field.data_type,
+                "is_primary": field.is_primary,
+                "nullable": field.nullable,
+                "params": field.params,
+            }
+            for field in parsed.fields
+        ],
+    }
+
+
+def _canonical_segments_data(
+    segments: dict[str, Any] | list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if isinstance(segments, dict):
+        segments_data = segments.get("segments")
+    else:
+        segments_data = segments
+    if not isinstance(segments_data, list):
+        raise SnapshotError("Snapshot segments input must be a list or an object with segments")
+
+    parsed_segments = _parse_segments({"segments": segments_data})
+    return [
+        {
+            "segment_id": segment.segment_id,
+            "partition_id": segment.partition_id,
+            "row_count": segment.row_count,
+            "storage_version": segment.storage_version,
+            "manifest_path": segment.manifest_path,
+            "manifest_version": segment.manifest_version,
+        }
+        for segment in parsed_segments
+    ]
 
 
 def _optional_int(value: Any) -> int | None:

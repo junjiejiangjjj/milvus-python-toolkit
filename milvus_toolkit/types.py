@@ -22,6 +22,8 @@ class StorageConfig:
 class ReadOptions:
     columns: tuple[str, ...] | None = None
     include: tuple[str, ...] = ()
+    manifest_version: str | None = None
+    predicate: str | None = None
 
 
 @dataclass(frozen=True)

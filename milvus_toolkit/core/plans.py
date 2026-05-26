@@ -12,6 +12,8 @@ class SegmentReadTask:
     projected_fields: tuple[FieldSchema, ...]
     include: tuple[str, ...]
     storage: StorageConfig
+    manifest_version: str | None = None
+    predicate: str | None = None
 
     @property
     def manifest_path(self) -> str:
@@ -26,3 +28,5 @@ class ReadPlan:
     projected_fields: tuple[FieldSchema, ...]
     include: tuple[str, ...]
     storage: StorageConfig
+    manifest_version: str | None = None
+    predicate: str | None = None

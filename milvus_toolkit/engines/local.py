@@ -19,7 +19,11 @@ def execute_read_plan(plan: ReadPlan, adapter: SegmentTableAdapter) -> pa.Table:
 def _read_task_table(task: SegmentReadTask, adapter: SegmentTableAdapter) -> pa.Table:
     table = read_segment_as_table(task, adapter)
     expected_row_count = task.segment.row_count
-    if expected_row_count is not None and table.num_rows != expected_row_count:
+    if (
+        task.predicate is None
+        and expected_row_count is not None
+        and table.num_rows != expected_row_count
+    ):
         raise StorageError(
             f"Segment {task.segment.segment_id} row count mismatch: "
             f"expected {expected_row_count}, got {table.num_rows}"

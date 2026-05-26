@@ -13,3 +13,6 @@ wheelhouse/
 *.whl
 .venv/
 .env
+.build/
+milvus_toolkit/_vendor/milvus_storage/
+third_party/milvus-storage/python/milvus_storage/lib/

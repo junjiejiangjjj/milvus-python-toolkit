@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "conan>=2"]
 build-backend = "hatchling.build"
 
 [project]
@@ -20,6 +20,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+native-snapshot = [
+  "fastavro>=1.9",
+]
+pymilvus = [
+  "pymilvus>=2.4",
+]
 test = [
   "pytest>=7",
   "ruff>=0.4",

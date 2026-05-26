@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pyarrow as pa
+import pytest
 
 import milvus_toolkit as mt
 import milvus_toolkit.api as api
@@ -23,7 +24,51 @@ def test_read_snapshot_returns_dataset_with_plan():
     )
 
     assert dataset.read_plan.tasks[0].segment.segment_id == 10
+    assert dataset.read_plan.tasks[0].segment.manifest_version == "v1"
+    assert dataset.read_plan.tasks[0].manifest_version is None
+    assert dataset.read_plan.tasks[0].predicate is None
     assert [field.name for field in dataset.read_plan.projected_fields] == ["id"]
+
+
+def test_read_snapshot_can_override_manifest_version():
+    dataset = mt.read_snapshot(
+        str(FIXTURE),
+        storage=mt.StorageConfig(endpoint="localhost:9000", bucket="bucket"),
+        manifest_version=7,
+    )
+
+    assert dataset.read_plan.manifest_version == "7"
+    assert dataset.read_plan.tasks[0].manifest_version == "7"
+
+
+
+def test_read_snapshot_can_pass_predicate_to_plan():
+    dataset = mt.read_snapshot(
+        str(FIXTURE),
+        storage=mt.StorageConfig(endpoint="localhost:9000", bucket="bucket"),
+        predicate="id > 100",
+    )
+
+    assert dataset.read_plan.predicate == "id > 100"
+    assert dataset.read_plan.tasks[0].predicate == "id > 100"
+
+
+
+def test_read_snapshot_rejects_invalid_predicate():
+    with pytest.raises(mt.ConfigError, match="predicate must be a string"):
+        mt.read_snapshot(
+            str(FIXTURE),
+            storage=mt.StorageConfig(endpoint="localhost:9000", bucket="bucket"),
+            predicate=123,
+        )
+
+    with pytest.raises(mt.ConfigError, match="predicate cannot be empty"):
+        mt.read_snapshot(
+            str(FIXTURE),
+            storage=mt.StorageConfig(endpoint="localhost:9000", bucket="bucket"),
+            predicate="  ",
+        )
+
 
 
 def test_read_snapshot_to_arrow_uses_storage_reader_factory(monkeypatch):

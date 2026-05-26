@@ -1,0 +1,36 @@
+{
+  "snapshot_id": "456",
+  "collection_id": "123",
+  "collection": {
+    "name": "demo_collection",
+    "schema": {
+      "name": "demo_collection",
+      "fields": [
+        {
+          "name": "id",
+          "fieldID": 100,
+          "dataType": "Int64",
+          "isPrimary": true,
+          "nullable": false
+        },
+        {
+          "name": "vector",
+          "field_id": 101,
+          "data_type": "FloatVector",
+          "params": {
+            "dim": "2"
+          }
+        }
+      ]
+    }
+  },
+  "segmentManifests": [
+    {
+      "segmentId": 10,
+      "partitionId": 1,
+      "rowCount": 2,
+      "manifestPath": "10.avro",
+      "manifestVersion": "v1"
+    }
+  ]
+}

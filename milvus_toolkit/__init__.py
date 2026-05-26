@@ -1,4 +1,14 @@
-from milvus_toolkit.api import inspect_snapshot, read_snapshot
+from milvus_toolkit.api import (
+    backfill_snapshot,
+    create_snapshot,
+    create_snapshot_from_milvus,
+    import_milvus_snapshot,
+    inspect_snapshot,
+    read_snapshot,
+    write_segment,
+    write_snapshot,
+    write_snapshot_segments,
+)
 from milvus_toolkit.errors import (
     ConfigError,
     EngineError,
@@ -27,6 +37,13 @@ __all__ = [
     "UnsupportedFeatureError",
     "UnsupportedSegmentError",
     "UnsupportedStorageError",
+    "backfill_snapshot",
+    "create_snapshot",
+    "create_snapshot_from_milvus",
+    "import_milvus_snapshot",
     "inspect_snapshot",
     "read_snapshot",
+    "write_segment",
+    "write_snapshot",
+    "write_snapshot_segments",
 ]

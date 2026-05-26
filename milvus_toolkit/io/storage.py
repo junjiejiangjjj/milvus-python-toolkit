@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import Protocol
 
 import pyarrow as pa
@@ -11,12 +12,36 @@ from milvus_toolkit.errors import StorageError, UnsupportedFeatureError
 from milvus_toolkit.types import FieldSchema, StorageConfig
 
 
+@dataclass(frozen=True)
+class SegmentWriteResult:
+    column_groups: list
+    manifest_version: str | None
+
+
 class StorageReader(Protocol):
     def read_segment_table(self, task: SegmentReadTask) -> pa.Table: ...
 
 
 class StorageWriter(Protocol):
-    pass
+    def write_segment_table(
+        self,
+        table: pa.Table,
+        schema: tuple[FieldSchema, ...],
+        segment_path: str,
+        mode: str = "append",
+    ) -> SegmentWriteResult:
+        ...
+
+
+def create_storage_writer(storage: StorageConfig) -> StorageWriter:
+    if storage.backend == "milvus_storage":
+        return MilvusStorageWriter(storage)
+    if storage.backend == "milvus_lite":
+        return MilvusLiteStorageWriter(storage)
+    raise UnsupportedFeatureError(
+        "Unsupported storage backend "
+        f"{storage.backend!r}; expected 'milvus_storage' or 'milvus_lite'"
+    )
 
 
 def create_storage_reader(storage: StorageConfig) -> StorageReader:
@@ -44,7 +69,10 @@ class MilvusStorageReader:
 
         try:
             with milvus_storage.Transaction(transaction_path, properties=properties) as transaction:
-                manifest = transaction.get_manifest()
+                manifest = _get_manifest(
+                    transaction,
+                    task.manifest_version,
+                )
             column_groups = milvus_storage.ColumnGroups.from_list(manifest.column_groups)
             with milvus_storage.Reader(
                 column_groups,
@@ -52,7 +80,10 @@ class MilvusStorageReader:
                 columns=columns,
                 properties=properties,
             ) as reader:
-                table = _scan_result_to_table(reader.scan())
+                table = _scan_result_to_table(
+                    reader.scan(predicate=task.predicate),
+                    schema=schema,
+                )
         except StorageError:
             raise
         except Exception as exc:
@@ -62,6 +93,44 @@ class MilvusStorageReader:
             ) from exc
 
         return table.select(columns) if columns else table
+
+
+class MilvusStorageWriter:
+    def __init__(self, storage: StorageConfig):
+        self.storage = storage
+
+    def write_segment_table(
+        self,
+        table: pa.Table,
+        schema: tuple[FieldSchema, ...],
+        segment_path: str,
+        mode: str = "append",
+    ) -> SegmentWriteResult:
+        milvus_storage = _load_milvus_storage()
+        properties = _storage_properties(self.storage)
+        arrow_schema = _to_pyarrow_schema(schema)
+        table = _coerce_table_schema(table, arrow_schema)
+        transaction_path = _transaction_path(segment_path)
+
+        try:
+            writer = milvus_storage.Writer(transaction_path, arrow_schema, properties)
+            for batch in table.to_batches():
+                writer.write(batch)
+            column_groups = writer.close()
+            transaction = milvus_storage.Transaction(transaction_path, properties)
+            _write_transaction_changes(transaction, column_groups, schema, mode)
+            manifest_version = _commit_manifest_version(transaction.commit())
+            transaction.close()
+        except StorageError:
+            raise
+        except Exception as exc:
+            raise StorageError(
+                f"Failed to write StorageV3 segment to {segment_path}: {exc}"
+            ) from exc
+        return SegmentWriteResult(
+            column_groups=list(column_groups),
+            manifest_version=manifest_version,
+        )
 
 
 class MilvusLiteStorageReader:
@@ -76,6 +145,28 @@ class MilvusLiteStorageReader:
         raise UnsupportedFeatureError(
             "Milvus Lite storage reader is not implemented yet; wire the lite-storage "
             "API inside MilvusLiteStorageReader"
+        )
+
+
+class MilvusLiteStorageWriter:
+    def __init__(self, storage: StorageConfig):
+        self.storage = storage
+
+    def write_segment_table(
+        self,
+        table: pa.Table,
+        schema: tuple[FieldSchema, ...],
+        segment_path: str,
+        mode: str = "append",
+    ) -> SegmentWriteResult:
+        del table, schema, segment_path, mode
+        if self.storage.root_path is None and "lite.path" not in self.storage.extra:
+            raise StorageError(
+                "Milvus Lite storage requires StorageConfig.root_path or extra['lite.path']"
+            )
+        raise UnsupportedFeatureError(
+            "Milvus Lite storage writer is not implemented yet; wire the lite-storage "
+            "API inside MilvusLiteStorageWriter"
         )
 
 
@@ -98,21 +189,127 @@ def _storage_properties(storage: StorageConfig) -> dict[str, str]:
     if storage.root_path is not None:
         properties["fs.root_path"] = storage.root_path
     if storage.endpoint is not None:
-        properties["fs.endpoint"] = storage.endpoint
+        properties["fs.address"] = storage.endpoint
     if storage.bucket is not None:
         properties["fs.bucket_name"] = storage.bucket
     if storage.access_key is not None:
         properties["fs.access_key_id"] = storage.access_key
     if storage.secret_key is not None:
-        properties["fs.secret_access_key"] = storage.secret_key
+        properties["fs.access_key_value"] = storage.secret_key
     if storage.region is not None:
         properties["fs.region"] = storage.region
     properties["fs.use_ssl"] = str(storage.use_ssl).lower()
     properties.update(storage.extra)
-    return properties
+    return _normalize_storage_properties(properties)
 
 
-def _scan_result_to_table(scan_result) -> pa.Table:
+
+def _normalize_storage_properties(properties: dict[str, str]) -> dict[str, str]:
+    aliases = {
+        "fs.endpoint": "fs.address",
+        "fs.secret_access_key": "fs.access_key_value",
+        "fs.secret_key": "fs.access_key_value",
+    }
+    normalized = dict(properties)
+    for alias, canonical in aliases.items():
+        if alias in normalized and canonical not in normalized:
+            normalized[canonical] = normalized[alias]
+    return {key: str(value) for key, value in normalized.items()}
+
+
+def _coerce_table_schema(table: pa.Table, schema: pa.Schema) -> pa.Table:
+    if table.schema == schema:
+        return table
+    missing = [name for name in schema.names if name not in table.column_names]
+    if missing:
+        raise StorageError(f"Cannot write table missing column(s): {', '.join(missing)}")
+    return table.select(schema.names).cast(schema)
+
+
+
+def _write_transaction_changes(
+    transaction,
+    column_groups,
+    schema: tuple[FieldSchema, ...],
+    mode: str,
+) -> None:
+    if mode == "append":
+        transaction.append_files(column_groups)
+        return
+    if mode == "addfield":
+        for field in schema:
+            transaction.drop_column(str(field.field_id))
+        if hasattr(transaction, "add_column_groups"):
+            transaction.add_column_groups(column_groups)
+        else:
+            column_groups_cls = type(column_groups)
+            for column_group in _column_group_items(column_groups):
+                _add_column_group(transaction, column_group, column_groups_cls)
+        return
+    raise StorageError(f"Unsupported StorageV3 write mode: {mode}")
+
+
+
+def _column_group_items(column_groups):
+    if hasattr(column_groups, "to_list"):
+        return column_groups.to_list()
+    return column_groups
+
+
+
+def _add_column_group(transaction, column_group, column_groups_cls) -> None:
+    try:
+        transaction.add_column_group(column_group)
+    except AttributeError as exc:
+        if "metadata" not in str(exc):
+            raise
+        column_groups = column_groups_cls.from_list([column_group])
+        transaction._lib.loon_transaction_add_column_group(
+            transaction._handle,
+            column_groups._get_c_ptr().column_group_array,
+        )
+
+
+
+def _commit_manifest_version(value) -> str | None:
+    if value is None:
+        return None
+    version = value.version if hasattr(value, "version") else value
+    if version is None:
+        return None
+    return str(version)
+
+
+
+def _get_manifest(transaction, manifest_version: str | None):
+    if manifest_version is None:
+        return transaction.get_manifest()
+    if hasattr(transaction, "get_manifest_at_version"):
+        return transaction.get_manifest_at_version(_manifest_version_int(manifest_version))
+    if hasattr(transaction, "get_manifest"):
+        try:
+            return transaction.get_manifest(version=_manifest_version_int(manifest_version))
+        except TypeError:
+            pass
+    raise StorageError(
+        "milvus-storage Transaction does not support reading a specific "
+        f"manifest version: {manifest_version}"
+    )
+
+
+
+def _manifest_version_int(manifest_version: str) -> int:
+    version = manifest_version[1:] if manifest_version.startswith("v") else manifest_version
+    try:
+        return int(version)
+    except ValueError as exc:
+        raise StorageError(
+            f"Manifest version must be an integer, got {manifest_version!r}"
+        ) from exc
+
+
+
+def _scan_result_to_table(scan_result, schema: pa.Schema | None = None) -> pa.Table:
     if isinstance(scan_result, pa.Table):
         return scan_result
 
@@ -128,7 +325,7 @@ def _scan_result_to_table(scan_result) -> pa.Table:
     if isinstance(scan_result, Iterable):
         batches = list(scan_result)
         if all(isinstance(batch, pa.RecordBatch) for batch in batches):
-            return pa.Table.from_batches(batches)
+            return pa.Table.from_batches(batches, schema=schema)
 
     raise StorageError(
         "milvus-storage Reader.scan() must return a pyarrow.Table, an object with "
@@ -141,7 +338,13 @@ def _to_pyarrow_schema(fields: tuple[FieldSchema, ...]) -> pa.Schema:
 
 
 def _to_pyarrow_field(field: FieldSchema) -> pa.Field:
-    return pa.field(field.name, _to_pyarrow_type(field), nullable=field.nullable)
+    metadata = {b"PARQUET:field_id": str(field.field_id).encode("utf-8")}
+    return pa.field(
+        field.name,
+        _to_pyarrow_type(field),
+        nullable=field.nullable,
+        metadata=metadata,
+    )
 
 
 def _to_pyarrow_type(field: FieldSchema) -> pa.DataType:
@@ -170,10 +373,7 @@ def _to_pyarrow_type(field: FieldSchema) -> pa.DataType:
 
 
 def _float_vector_type(field: FieldSchema) -> pa.DataType:
-    dim = field.params.get("dim")
-    if dim is None:
-        return pa.list_(pa.float32())
-    return pa.list_(pa.float32(), int(dim))
+    return pa.list_(pa.float32())
 
 
 def _transaction_path(manifest_path: str) -> str:

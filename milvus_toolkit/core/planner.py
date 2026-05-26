@@ -17,6 +17,8 @@ def plan_snapshot_read(
     storage: StorageConfig,
     columns: tuple[str, ...] | None = None,
     include: tuple[str, ...] = (),
+    manifest_version: str | None = None,
+    predicate: str | None = None,
 ) -> ReadPlan:
     snapshot_metadata = parse_snapshot(snapshot) if isinstance(snapshot, dict) else snapshot
     unsupported_include = sorted(set(include) - _ALLOWED_INCLUDE)
@@ -36,6 +38,8 @@ def plan_snapshot_read(
                 projected_fields=projected_fields,
                 include=include,
                 storage=storage,
+                manifest_version=manifest_version,
+                predicate=predicate,
             )
         )
 
@@ -45,4 +49,6 @@ def plan_snapshot_read(
         projected_fields=projected_fields,
         include=include,
         storage=storage,
+        manifest_version=manifest_version,
+        predicate=predicate,
     )
