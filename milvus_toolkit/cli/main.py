@@ -327,6 +327,13 @@ def _split_fields(value: str) -> tuple[str, ...]:
 
 
 
+def _split_optional_fields(value: str | None) -> tuple[str, ...] | None:
+    if value is None:
+        return None
+    return _split_fields(value)
+
+
+
 def _storage_config_from_args(args: argparse.Namespace) -> mt.StorageConfig:
     return mt.StorageConfig(
         storage_type=args.storage_type,
@@ -362,17 +369,23 @@ def _load_json_file(path: str) -> Any:
 
 
 def _write_json_file(path: str, payload: Any, overwrite: bool, pretty: bool) -> None:
+    output_path = _validate_output_path(path, overwrite=overwrite)
+    if pretty:
+        text = json.dumps(payload, indent=2, sort_keys=True)
+    else:
+        text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    output_path.write_text(f"{text}\n", encoding="utf-8")
+
+
+
+def _validate_output_path(path: str, overwrite: bool):
     from pathlib import Path
 
     output_path = Path(path)
     if output_path.exists() and not overwrite:
         raise mt.ConfigError(f"Output already exists: {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    if pretty:
-        text = json.dumps(payload, indent=2, sort_keys=True)
-    else:
-        text = json.dumps(payload, separators=(",", ":"), sort_keys=True)
-    output_path.write_text(f"{text}\n", encoding="utf-8")
+    return output_path
 
 
 

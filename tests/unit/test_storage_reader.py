@@ -29,7 +29,6 @@ def _segment_read_task(
     storage: StorageConfig | None = None,
     storage_version: str | None = "StorageV3",
     manifest_path: str | None = "segments/10/manifest.json",
-    predicate: str | None = None,
 ) -> SegmentReadTask:
     return SegmentReadTask(
         segment=SegmentMetadata(
@@ -47,7 +46,6 @@ def _segment_read_task(
         projected_fields=(FieldSchema("id", 100, "Int64"),),
         include=(),
         storage=storage or StorageConfig(storage_type="local", root_path="/data/root"),
-        predicate=predicate,
     )
 
 
@@ -291,8 +289,7 @@ def test_milvus_storage_reader_uses_transaction_manifest_and_reader(monkeypatch)
         def __exit__(self, exc_type, exc, traceback):
             return False
 
-        def scan(self, predicate=None):
-            calls["predicate"] = predicate
+        def scan(self):
             return FakeBatchReader()
 
     fake_milvus_storage = SimpleNamespace(
@@ -344,71 +341,11 @@ def test_milvus_storage_reader_uses_transaction_manifest_and_reader(monkeypatch)
     assert calls["column_groups"] == ["group"]
     assert calls["reader"]["column_groups"] == "ffi-column-groups"
     assert calls["reader"]["columns"] == ["id", "vector"]
-    assert calls["predicate"] is None
     assert calls["reader"]["schema"].field("id").type == pa.int64()
     assert calls["reader"]["schema"].field("id").metadata == {
         b"PARQUET:field_id": b"100"
     }
     assert table.to_pydict() == {"id": [1, 2], "vector": [[0.1, 0.2], [0.3, 0.4]]}
-
-
-def test_milvus_storage_reader_pushes_predicate_to_scan(monkeypatch):
-    calls = {}
-
-    class FakeManifest:
-        column_groups = ["group"]
-
-    class FakeTransaction:
-        def __init__(self, path, properties):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback):
-            return False
-
-        def get_manifest(self):
-            return FakeManifest()
-
-    class FakeColumnGroups:
-        @staticmethod
-        def from_list(column_groups):
-            return column_groups
-
-    class FakeBatchReader:
-        def read_all(self):
-            return pa.table({"id": [2]})
-
-    class FakeReader:
-        def __init__(self, column_groups, schema, columns, properties):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, traceback):
-            return False
-
-        def scan(self, predicate=None):
-            calls["predicate"] = predicate
-            return FakeBatchReader()
-
-    monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
-        lambda: SimpleNamespace(
-            Transaction=FakeTransaction,
-            ColumnGroups=FakeColumnGroups,
-            Reader=FakeReader,
-        ),
-    )
-
-    task = _segment_read_task(predicate="id > 1")
-
-    table = MilvusStorageReader(task.storage).read_segment_table(task)
-
-    assert calls["predicate"] == "id > 1"
-    assert table.to_pydict() == {"id": [2]}
 
 
 def test_milvus_storage_writer_writes_batches_and_commits(monkeypatch):

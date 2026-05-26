@@ -27,14 +27,11 @@ def read_snapshot(
     columns: Sequence[str] | None = None,
     include: Sequence[str] | None = None,
     manifest_version: str | int | None = None,
-    predicate: str | None = None,
 ) -> MilvusDataset:
-    """Read a snapshot, optionally passing a storage-defined predicate to StorageV3."""
     options = _read_options(
         columns=columns,
         include=include,
         manifest_version=manifest_version,
-        predicate=predicate,
     )
     snapshot = load_snapshot_json(snapshot_path)
     plan = plan_snapshot_read(
@@ -43,7 +40,6 @@ def read_snapshot(
         columns=options.columns,
         include=options.include,
         manifest_version=options.manifest_version,
-        predicate=options.predicate,
     )
     reader = create_storage_reader(storage)
     return MilvusDataset(read_plan=plan, _to_arrow=lambda: execute_read_plan(plan, reader))
@@ -423,18 +419,11 @@ def _read_options(
     columns: Sequence[str] | None,
     include: Sequence[str] | None,
     manifest_version: str | int | None,
-    predicate: str | None,
 ) -> ReadOptions:
-    if predicate is not None:
-        if not isinstance(predicate, str):
-            raise ConfigError("read_snapshot predicate must be a string")
-        if not predicate.strip():
-            raise ConfigError("read_snapshot predicate cannot be empty")
     return ReadOptions(
         columns=None if columns is None else tuple(columns),
         include=() if include is None else tuple(include),
         manifest_version=None if manifest_version is None else str(manifest_version),
-        predicate=predicate,
     )
 
 

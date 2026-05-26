@@ -22,19 +22,6 @@ def test_plan_snapshot_read_storage_v3():
     assert plan.tasks[0].manifest_path == "segments/10/manifest.json"
     assert [field.name for field in plan.projected_fields] == ["id"]
     assert plan.include == ("segment_id", "row_offset")
-    assert plan.predicate is None
-    assert plan.tasks[0].predicate is None
-
-
-def test_plan_snapshot_read_propagates_predicate():
-    plan = plan_snapshot_read(
-        load_snapshot_json(str(FIXTURES / "snapshot_storage_v3.json")),
-        storage=StorageConfig(endpoint="localhost:9000", bucket="bucket"),
-        predicate="id > 100",
-    )
-
-    assert plan.predicate == "id > 100"
-    assert plan.tasks[0].predicate == "id > 100"
 
 
 

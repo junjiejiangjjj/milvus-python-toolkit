@@ -13,7 +13,6 @@ class SegmentReadTask:
     include: tuple[str, ...]
     storage: StorageConfig
     manifest_version: str | None = None
-    predicate: str | None = None
 
     @property
     def manifest_path(self) -> str:
@@ -29,4 +28,3 @@ class ReadPlan:
     include: tuple[str, ...]
     storage: StorageConfig
     manifest_version: str | None = None
-    predicate: str | None = None

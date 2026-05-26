@@ -22,14 +22,6 @@ class FakeStorageAdapter:
         return pa.table({"id": [1, 2], "vector": [[0.1, 0.2], [0.3, 0.4]]})
 
 
-class PredicateFakeStorageAdapter:
-    def __init__(self):
-        self.predicates = []
-
-    def read_segment_table(self, task):
-        self.predicates.append(task.predicate)
-        return pa.table({"id": [2]})
-
 
 class MultiSegmentFakeStorageAdapter:
     def read_segment_table(self, task):
@@ -49,21 +41,6 @@ def test_local_engine_reads_with_fake_storage_adapter():
     assert table.column_names == ["id", "vector", "segment_id", "row_offset"]
     assert table["segment_id"].to_pylist() == [10, 10]
     assert table["row_offset"].to_pylist() == [0, 1]
-
-
-def test_local_engine_passes_predicate_to_storage_adapter():
-    adapter = PredicateFakeStorageAdapter()
-    plan = plan_snapshot_read(
-        load_snapshot_json(str(FIXTURE)),
-        storage=StorageConfig(endpoint="localhost:9000", bucket="bucket"),
-        columns=("id",),
-        predicate="id > 1",
-    )
-
-    table = execute_read_plan(plan, adapter)
-
-    assert adapter.predicates == ["id > 1"]
-    assert table.to_pydict() == {"id": [2]}
 
 
 
@@ -247,6 +224,7 @@ def test_cli_write_segment_with_real_milvus_storage_smoke(tmp_path, capsys):
     assert result["name"].to_pylist() == ["a", "b"]
     assert result["segment_id"].to_pylist() == [10, 10]
     assert result["row_offset"].to_pylist() == [0, 1]
+
 
 
 

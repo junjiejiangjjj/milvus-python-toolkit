@@ -213,6 +213,7 @@ def test_cli_import_milvus_snapshot_requires_structured_ids(tmp_path, capsys):
     assert "--collection-id and --snapshot-id" in captured.err
 
 
+
 def test_cli_write_segment_outputs_metadata(tmp_path, capsys, monkeypatch):
     input_path = tmp_path / "input.parquet"
     schema_path = tmp_path / "schema.json"

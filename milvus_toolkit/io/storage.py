@@ -80,10 +80,7 @@ class MilvusStorageReader:
                 columns=columns,
                 properties=properties,
             ) as reader:
-                table = _scan_result_to_table(
-                    reader.scan(predicate=task.predicate),
-                    schema=schema,
-                )
+                table = _scan_result_to_table(reader.scan(), schema=schema)
         except StorageError:
             raise
         except Exception as exc:
