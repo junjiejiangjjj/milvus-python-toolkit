@@ -8,6 +8,66 @@ from typing import Any
 from milvus_toolkit.core.snapshot import build_snapshot_payload
 from milvus_toolkit.errors import ConfigError, SnapshotError
 
+_SEGMENT_MANIFEST_AVRO_SCHEMA = {
+    "type": "record",
+    "name": "ManifestEntry",
+    "fields": [
+        {"name": "segment_id", "type": "long"},
+        {"name": "partition_id", "type": "long"},
+        {"name": "segment_level", "type": "long"},
+        {"name": "channel_name", "type": "string"},
+        {"name": "num_of_rows", "type": "long"},
+        {
+            "name": "start_position",
+            "type": {
+                "type": "record",
+                "name": "AvroMsgPosition",
+                "fields": [
+                    {"name": "channel_name", "type": "string"},
+                    {"name": "msg_id", "type": "bytes"},
+                    {"name": "msg_group", "type": "string"},
+                    {"name": "timestamp", "type": "long"},
+                ],
+            },
+        },
+        {"name": "dml_position", "type": "AvroMsgPosition"},
+        {"name": "storage_version", "type": "long"},
+        {"name": "is_sorted", "type": "boolean"},
+        {
+            "name": "binlog_files",
+            "type": {
+                "type": "array",
+                "items": {
+                    "type": "record",
+                    "name": "AvroFieldBinlog",
+                    "fields": [
+                        {"name": "field_id", "type": "long"},
+                        {
+                            "name": "binlogs",
+                            "type": {
+                                "type": "array",
+                                "items": {
+                                    "type": "record",
+                                    "name": "AvroBinlog",
+                                    "fields": [
+                                        {"name": "entries_num", "type": "long"},
+                                        {"name": "timestamp_from", "type": "long"},
+                                        {"name": "timestamp_to", "type": "long"},
+                                        {"name": "log_path", "type": "string"},
+                                        {"name": "log_size", "type": "long"},
+                                        {"name": "log_id", "type": "long"},
+                                        {"name": "memory_size", "type": "long"},
+                                    ],
+                                },
+                            },
+                        },
+                    ],
+                },
+            },
+        },
+    ],
+}
+
 
 def build_snapshot_payload_from_native_snapshot(
     metadata_path: str | Path | None = None,
@@ -215,7 +275,7 @@ def _read_manifest_record(path: Path | None) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        from fastavro import reader
+        import fastavro
     except ImportError as exc:
         raise ConfigError(
             "fastavro is required to import Milvus native snapshot manifests. "
@@ -223,7 +283,33 @@ def _read_manifest_record(path: Path | None) -> dict[str, Any]:
         ) from exc
 
     with path.open("rb") as manifest_file:
-        records = list(reader(manifest_file))
+        schemaless_error = None
+        if hasattr(fastavro, "schemaless_reader"):
+            try:
+                record = fastavro.schemaless_reader(
+                    manifest_file,
+                    _SEGMENT_MANIFEST_AVRO_SCHEMA,
+                )
+                if not isinstance(record, Mapping):
+                    raise SnapshotError(
+                        f"Native snapshot schemaless manifest record must be an object: {path}"
+                    )
+                return _normalize_manifest_record(record, path)
+            except Exception as exc:
+                schemaless_error = exc
+                manifest_file.seek(0)
+
+        try:
+            records = list(fastavro.reader(manifest_file))
+        except Exception as exc:
+            if schemaless_error is None:
+                raise SnapshotError(
+                    f"Failed to decode native snapshot Avro manifest {path}: {exc}"
+                ) from exc
+            raise SnapshotError(
+                f"Failed to decode native snapshot Avro manifest {path} "
+                f"as schemaless or OCF Avro: schemaless={schemaless_error}; ocf={exc}"
+            ) from exc
     if not records:
         return {}
     if not isinstance(records[0], Mapping):
