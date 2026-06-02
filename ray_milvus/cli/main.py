@@ -8,8 +8,8 @@ from typing import Any
 
 import pyarrow.parquet as pq
 
-import milvus_toolkit as mt
-from milvus_toolkit.errors import MilvusToolkitError
+import ray_milvus as mt
+from ray_milvus.errors import MilvusToolkitError
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,10 +24,12 @@ def main(argv: list[str] | None = None) -> int:
         return _create_snapshot(args)
     if args.command == "import-milvus-snapshot":
         return _import_milvus_snapshot(args)
+    if args.command == "import-native-milvus-snapshot":
+        return _import_native_milvus_snapshot(args)
     if args.command == "create-milvus-snapshot":
         return _create_milvus_snapshot(args)
-    if args.command == "write-segment":
-        return _write_segment(args)
+    if args.command == "write-native-segment":
+        return _write_native_segment(args)
     if args.command == "backfill-snapshot":
         return _backfill_snapshot(args)
     parser.print_help()
@@ -35,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="milvus-toolkit")
+    parser = argparse.ArgumentParser(prog="ray-milvus")
     subparsers = parser.add_subparsers(dest="command")
 
     inspect_parser = subparsers.add_parser("inspect", help="Inspect a Milvus snapshot")
@@ -53,33 +55,42 @@ def _build_parser() -> argparse.ArgumentParser:
         "create-snapshot",
         help="Create a toolkit snapshot JSON from schema and segment metadata",
     )
-    schema_source = create_parser.add_mutually_exclusive_group(required=True)
-    schema_source.add_argument("--schema-file")
-    schema_source.add_argument("--schema-from-milvus", action="store_true")
+    create_parser.add_argument("--schema-file", required=True)
     create_parser.add_argument("--segments-file", required=True)
     create_parser.add_argument("--output", required=True)
     create_parser.add_argument("--collection-name")
-    create_parser.add_argument("--uri")
-    create_parser.add_argument("--token")
-    create_parser.add_argument("--user")
-    create_parser.add_argument("--password")
-    create_parser.add_argument("--db-name")
     create_parser.add_argument("--overwrite", action="store_true")
     create_parser.add_argument("--compact", action="store_true")
 
     import_parser = subparsers.add_parser(
         "import-milvus-snapshot",
-        help="Import a Milvus native snapshot into toolkit snapshot JSON",
+        help="Import an existing Milvus snapshot into ray-milvus JSON",
     )
-    import_source = import_parser.add_mutually_exclusive_group(required=True)
-    import_source.add_argument("--metadata")
-    import_source.add_argument("--snapshot-root")
-    import_parser.add_argument("--manifest-dir")
-    import_parser.add_argument("--collection-id")
-    import_parser.add_argument("--snapshot-id")
+    import_parser.add_argument("--uri", required=True)
+    import_parser.add_argument("--collection-name", required=True)
+    import_parser.add_argument("--snapshot-name", required=True)
     import_parser.add_argument("--output", required=True)
+    import_parser.add_argument("--token")
+    import_parser.add_argument("--user")
+    import_parser.add_argument("--password")
+    import_parser.add_argument("--db-name")
+    _add_storage_options(import_parser)
     import_parser.add_argument("--overwrite", action="store_true")
     import_parser.add_argument("--compact", action="store_true")
+
+    native_import_parser = subparsers.add_parser(
+        "import-native-milvus-snapshot",
+        help="Import a Milvus native snapshot from internal metadata paths",
+    )
+    native_import_source = native_import_parser.add_mutually_exclusive_group(required=True)
+    native_import_source.add_argument("--metadata")
+    native_import_source.add_argument("--snapshot-root")
+    native_import_parser.add_argument("--manifest-dir")
+    native_import_parser.add_argument("--collection-id")
+    native_import_parser.add_argument("--snapshot-id")
+    native_import_parser.add_argument("--output", required=True)
+    native_import_parser.add_argument("--overwrite", action="store_true")
+    native_import_parser.add_argument("--compact", action="store_true")
 
     milvus_snapshot_parser = subparsers.add_parser(
         "create-milvus-snapshot",
@@ -87,7 +98,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     milvus_snapshot_parser.add_argument("--uri", required=True)
     milvus_snapshot_parser.add_argument("--collection-name", required=True)
-    milvus_snapshot_parser.add_argument("--snapshot-name", required=True)
+    milvus_snapshot_parser.add_argument("--snapshot-name")
+    milvus_snapshot_parser.add_argument("--auto-snapshot-name", action="store_true")
     milvus_snapshot_parser.add_argument("--output", required=True)
     milvus_snapshot_parser.add_argument("--token")
     milvus_snapshot_parser.add_argument("--user")
@@ -100,8 +112,8 @@ def _build_parser() -> argparse.ArgumentParser:
     milvus_snapshot_parser.add_argument("--compact", action="store_true")
 
     write_parser = subparsers.add_parser(
-        "write-segment",
-        help="Write a Parquet file as a StorageV3 segment through milvus-storage",
+        "write-native-segment",
+        help="Write a Parquet file as a StorageV3 segment through internal metadata",
     )
     write_parser.add_argument("--input", required=True)
     write_parser.add_argument("--schema-file", required=True)
@@ -186,36 +198,15 @@ def _inspect(args: argparse.Namespace) -> int:
 
 
 def _create_snapshot(args: argparse.Namespace) -> int:
-    if args.schema_from_milvus and args.uri is None:
-        print("error: --uri is required with --schema-from-milvus", file=sys.stderr)
-        return 1
-    if args.schema_from_milvus and args.collection_name is None:
-        print("error: --collection-name is required with --schema-from-milvus", file=sys.stderr)
-        return 1
-
     try:
-        if args.schema_from_milvus:
-            result = mt.create_snapshot_from_milvus(
-                uri=args.uri,
-                collection_name=args.collection_name,
-                segments=args.segments_file,
-                output_path=args.output,
-                token=args.token,
-                user=args.user,
-                password=args.password,
-                db_name=args.db_name,
-                overwrite=args.overwrite,
-                pretty=not args.compact,
-            )
-        else:
-            result = mt.create_snapshot(
-                args.schema_file,
-                args.segments_file,
-                output_path=args.output,
-                collection_name=args.collection_name,
-                overwrite=args.overwrite,
-                pretty=not args.compact,
-            )
+        result = mt.create_snapshot(
+            args.schema_file,
+            args.segments_file,
+            output_path=args.output,
+            collection_name=args.collection_name,
+            overwrite=args.overwrite,
+            pretty=not args.compact,
+        )
     except MilvusToolkitError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -228,6 +219,33 @@ def _create_snapshot(args: argparse.Namespace) -> int:
 
 
 def _import_milvus_snapshot(args: argparse.Namespace) -> int:
+    try:
+        result = mt.import_milvus_snapshot(
+            uri=args.uri,
+            collection_name=args.collection_name,
+            snapshot_name=args.snapshot_name,
+            output_path=args.output,
+            storage=_storage_config_from_args(args),
+            token=args.token,
+            user=args.user,
+            password=args.password,
+            db_name=args.db_name,
+            overwrite=args.overwrite,
+            pretty=not args.compact,
+        )
+    except MilvusToolkitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        "Imported Milvus snapshot "
+        f"{args.snapshot_name} with {len(result['segments'])} segment(s) to {args.output}"
+    )
+    return 0
+
+
+
+def _import_native_milvus_snapshot(args: argparse.Namespace) -> int:
     if args.snapshot_root is not None and (args.collection_id is None or args.snapshot_id is None):
         print(
             "error: --collection-id and --snapshot-id are required with --snapshot-root",
@@ -236,7 +254,7 @@ def _import_milvus_snapshot(args: argparse.Namespace) -> int:
         return 1
 
     try:
-        result = mt.import_milvus_snapshot(
+        result = mt.import_native_milvus_snapshot(
             metadata_path=args.metadata,
             manifest_dir=args.manifest_dir,
             snapshot_root=args.snapshot_root,
@@ -251,7 +269,7 @@ def _import_milvus_snapshot(args: argparse.Namespace) -> int:
         return 1
 
     print(
-        "Imported Milvus snapshot "
+        "Imported native Milvus snapshot "
         f"{args.output} for {len(result['segments'])} segment(s)"
     )
     return 0
@@ -259,13 +277,24 @@ def _import_milvus_snapshot(args: argparse.Namespace) -> int:
 
 
 def _create_milvus_snapshot(args: argparse.Namespace) -> int:
+    if args.snapshot_name is not None and args.auto_snapshot_name:
+        print("error: --snapshot-name cannot be used with --auto-snapshot-name", file=sys.stderr)
+        return 1
+    if args.snapshot_name is None and not args.auto_snapshot_name:
+        print(
+            "error: --snapshot-name is required unless --auto-snapshot-name is set",
+            file=sys.stderr,
+        )
+        return 1
+
     try:
-        result = mt.create_snapshot_from_milvus_snapshot(
+        result = mt.create_snapshot_from_milvus(
             uri=args.uri,
             collection_name=args.collection_name,
             snapshot_name=args.snapshot_name,
             output_path=args.output,
             storage=_storage_config_from_args(args),
+            auto_snapshot_name=args.auto_snapshot_name,
             token=args.token,
             user=args.user,
             password=args.password,
@@ -281,42 +310,36 @@ def _create_milvus_snapshot(args: argparse.Namespace) -> int:
 
     print(
         "Created Milvus snapshot "
-        f"{args.snapshot_name} and imported {len(result['segments'])} segment(s) to {args.output}"
+        f"{result['snapshot_name']} and imported "
+        f"{len(result['segments'])} segment(s) to {args.output}"
     )
     return 0
 
 
 
-def _write_segment(args: argparse.Namespace) -> int:
+def _write_native_segment(args: argparse.Namespace) -> int:
     try:
         storage = _storage_config_from_args(args)
         schema = _load_json_file(args.schema_file)
         table = pq.read_table(args.input)
-        if args.snapshot_output is None:
-            segment = mt.write_segment(
-                table,
-                schema,
-                storage,
-                segment_path=args.segment_path,
-                segment_id=args.segment_id,
-                partition_id=args.partition_id,
-                manifest_version=args.manifest_version,
-            )
-        else:
-            snapshot = mt.write_snapshot(
-                table,
-                schema,
-                storage,
-                segment_path=args.segment_path,
-                segment_id=args.segment_id,
-                output_path=args.snapshot_output,
-                collection_name=args.collection_name,
-                partition_id=args.partition_id,
-                manifest_version=args.manifest_version,
+        snapshot = mt.write_snapshot(
+            table,
+            schema,
+            storage,
+            segment_path=args.segment_path,
+            segment_id=args.segment_id,
+            collection_name=args.collection_name,
+            partition_id=args.partition_id,
+            manifest_version=args.manifest_version,
+        )
+        segment = snapshot["segments"][0]
+        if args.snapshot_output is not None:
+            _write_json_file(
+                args.snapshot_output,
+                snapshot,
                 overwrite=args.overwrite,
                 pretty=not args.compact,
             )
-            segment = snapshot["segments"][0]
         if args.output is not None:
             _write_json_file(
                 args.output,
@@ -332,11 +355,15 @@ def _write_segment(args: argparse.Namespace) -> int:
         return 1
 
     if args.snapshot_output is not None:
-        print(f"Wrote segment {args.segment_id} and snapshot {args.snapshot_output}")
+        print(
+            "Wrote snapshot "
+            f"{args.snapshot_output} for collection {snapshot.get('collection_name')} "
+            f"with {len(snapshot['segments'])} segment(s)"
+        )
     elif args.output is not None:
         print(f"Wrote segment {args.segment_id} metadata {args.output}")
     else:
-        print(json.dumps(segment, indent=2, sort_keys=True))
+        print(json.dumps(snapshot, indent=2, sort_keys=True))
     return 0
 
 

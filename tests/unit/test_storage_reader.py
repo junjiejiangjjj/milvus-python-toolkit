@@ -1,16 +1,17 @@
 from types import SimpleNamespace
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
-from milvus_toolkit.core.plans import SegmentReadTask
-from milvus_toolkit.errors import (
+from ray_milvus.core.plans import SegmentReadTask
+from ray_milvus.errors import (
     ManifestError,
     StorageError,
     UnsupportedFeatureError,
     UnsupportedSegmentError,
 )
-from milvus_toolkit.io.storage import (
+from ray_milvus.io.storage import (
     MilvusLiteStorageReader,
     MilvusStorageReader,
     MilvusStorageWriter,
@@ -22,7 +23,7 @@ from milvus_toolkit.io.storage import (
     create_storage_reader,
     create_storage_writer,
 )
-from milvus_toolkit.types import FieldSchema, MilvusSchema, SegmentMetadata, StorageConfig
+from ray_milvus.types import FieldSchema, MilvusSchema, SegmentMetadata, StorageConfig
 
 
 def _segment_read_task(
@@ -298,7 +299,7 @@ def test_milvus_storage_reader_uses_transaction_manifest_and_reader(monkeypatch)
         Reader=FakeReader,
     )
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: fake_milvus_storage,
     )
 
@@ -348,6 +349,94 @@ def test_milvus_storage_reader_uses_transaction_manifest_and_reader(monkeypatch)
     assert table.to_pydict() == {"id": [1, 2], "vector": [[0.1, 0.2], [0.3, 0.4]]}
 
 
+def test_milvus_storage_reader_streams_record_batches(monkeypatch):
+    calls = {}
+    batches = [
+        pa.RecordBatch.from_pydict({"id": [1], "vector": [[0.1, 0.2]]}),
+        pa.RecordBatch.from_pydict({"id": [2], "vector": [[0.3, 0.4]]}),
+    ]
+
+    class FakeManifest:
+        column_groups = ["group"]
+
+    class FakeTransaction:
+        def __init__(self, path, properties):
+            calls["transaction"] = {"path": path, "properties": properties}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def get_manifest(self):
+            return FakeManifest()
+
+    class FakeColumnGroups:
+        @staticmethod
+        def from_list(column_groups):
+            calls["column_groups"] = column_groups
+            return "ffi-column-groups"
+
+    class FakeReader:
+        def __init__(self, column_groups, schema, columns, properties):
+            calls["reader"] = {"columns": columns}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def scan(self):
+            return iter(batches)
+
+    fake_milvus_storage = SimpleNamespace(
+        Transaction=FakeTransaction,
+        ColumnGroups=FakeColumnGroups,
+        Reader=FakeReader,
+    )
+    monkeypatch.setattr(
+        "ray_milvus.io.storage._load_milvus_storage",
+        lambda: fake_milvus_storage,
+    )
+
+    storage = StorageConfig(storage_type="local", root_path="/data/root")
+    task = SegmentReadTask(
+        segment=SegmentMetadata(
+            segment_id=10,
+            partition_id=1,
+            row_count=2,
+            storage_version="StorageV3",
+            manifest_path="segments/10/manifest.json",
+            manifest_version="v1",
+        ),
+        schema=MilvusSchema(
+            collection_name="demo",
+            fields=(
+                FieldSchema("id", 100, "Int64"),
+                FieldSchema("vector", 101, "FloatVector", params={"dim": "2"}),
+            ),
+        ),
+        projected_fields=(
+            FieldSchema("id", 100, "Int64"),
+            FieldSchema("vector", 101, "FloatVector", params={"dim": "2"}),
+        ),
+        include=(),
+        storage=storage,
+    )
+
+    result = list(MilvusStorageReader(storage).read_segment_batches(task, batch_size=1))
+
+    assert calls["column_groups"] == ["group"]
+    assert calls["reader"] == {"columns": ["id", "vector"]}
+    assert [batch.to_pydict() for batch in result] == [
+        {"id": [1], "vector": [[0.10000000149011612, 0.20000000298023224]]},
+        {"id": [2], "vector": [[0.30000001192092896, 0.4000000059604645]]},
+    ]
+
+
+
 def test_milvus_storage_writer_writes_batches_and_commits(monkeypatch):
     calls = {}
 
@@ -380,7 +469,7 @@ def test_milvus_storage_writer_writes_batches_and_commits(monkeypatch):
 
     fake_milvus_storage = SimpleNamespace(Writer=FakeWriter, Transaction=FakeTransaction)
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: fake_milvus_storage,
     )
 
@@ -446,7 +535,7 @@ def test_milvus_storage_writer_addfield_drops_fields_and_adds_column_groups(monk
 
     fake_milvus_storage = SimpleNamespace(Writer=FakeWriter, Transaction=FakeTransaction)
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: fake_milvus_storage,
     )
 
@@ -480,7 +569,7 @@ def test_milvus_storage_writer_rejects_unknown_write_mode(monkeypatch):
 
     fake_milvus_storage = SimpleNamespace(Writer=FakeWriter, Transaction=FakeTransaction)
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: fake_milvus_storage,
     )
 
@@ -500,7 +589,7 @@ def test_milvus_storage_writer_wraps_backend_errors(monkeypatch):
 
     fake_milvus_storage = SimpleNamespace(Writer=FakeWriter)
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: fake_milvus_storage,
     )
 
@@ -512,21 +601,129 @@ def test_milvus_storage_writer_wraps_backend_errors(monkeypatch):
         )
 
 
+def test_milvus_storage_reader_reads_manifest_list_packed_parquet(tmp_path):
+    segment_root = tmp_path / "files" / "insert_log" / "100" / "200" / "300"
+    id_dir = segment_root / "0"
+    vector_dir = segment_root / "101"
+    id_dir.mkdir(parents=True)
+    vector_dir.mkdir(parents=True)
+    pq.write_table(
+        pa.table(
+            {
+                "id": pa.array([1, 2], type=pa.int64()),
+                "RowID": pa.array([10, 11], type=pa.int64()),
+                "Timestamp": pa.array([1000, 1001], type=pa.int64()),
+            },
+            schema=pa.schema(
+                [
+                    pa.field(
+                        "id",
+                        pa.int64(),
+                        nullable=False,
+                        metadata={b"PARQUET:field_id": b"100"},
+                    ),
+                    pa.field(
+                        "RowID",
+                        pa.int64(),
+                        nullable=False,
+                        metadata={b"PARQUET:field_id": b"0"},
+                    ),
+                    pa.field(
+                        "Timestamp",
+                        pa.int64(),
+                        nullable=False,
+                        metadata={b"PARQUET:field_id": b"1"},
+                    ),
+                ],
+                metadata={
+                    b"storage_version": b"1.0.0",
+                    b"group_field_id_list": b"100,0,1;101",
+                },
+            ),
+        ),
+        id_dir / "log-1",
+    )
+    pq.write_table(
+        pa.table(
+            {
+                "vector": pa.array(
+                    [b"\x00\x00\x80?\x00\x00\x00@", b"\x00\x00@@\x00\x00\x80@"],
+                    type=pa.binary(8),
+                )
+            },
+            schema=pa.schema(
+                [
+                    pa.field(
+                        "vector",
+                        pa.binary(8),
+                        nullable=False,
+                        metadata={b"PARQUET:field_id": b"101"},
+                    )
+                ],
+                metadata={
+                    b"storage_version": b"1.0.0",
+                    b"group_field_id_list": b"100,0,1;101",
+                },
+            ),
+        ),
+        vector_dir / "log-2",
+    )
+
+    task = SegmentReadTask(
+        segment=SegmentMetadata(
+            segment_id=300,
+            partition_id=200,
+            row_count=2,
+            storage_version="PackedParquet",
+            manifest_path="files/insert_log/100/200/300",
+            manifest_version=None,
+            raw={"packed_parquet_manifest": True},
+        ),
+        schema=MilvusSchema(
+            collection_name="demo",
+            fields=(
+                FieldSchema("id", 100, "Int64"),
+                FieldSchema("vector", 101, "FloatVector", params={"dim": "2"}),
+            ),
+        ),
+        projected_fields=(
+            FieldSchema("id", 100, "Int64"),
+            FieldSchema("vector", 101, "FloatVector", params={"dim": "2"}),
+        ),
+        include=(),
+        storage=StorageConfig(storage_type="local", root_path=str(tmp_path)),
+    )
+
+    reader = MilvusStorageReader(task.storage)
+    table = reader.read_segment_table(task)
+    batches = list(reader.read_segment_batches(task, batch_size=1))
+
+    assert table.to_pydict() == {
+        "id": [1, 2],
+        "vector": [[1.0, 2.0], [3.0, 4.0]],
+    }
+    assert [batch.to_pydict() for batch in batches] == [
+        {"id": [1], "vector": [[1.0, 2.0]]},
+        {"id": [2], "vector": [[3.0, 4.0]]},
+    ]
+
+
+
 def test_milvus_storage_reader_rejects_non_storage_v3_before_backend(monkeypatch):
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: pytest.fail("milvus-storage backend should not be loaded"),
     )
 
     with pytest.raises(UnsupportedSegmentError):
         MilvusStorageReader(StorageConfig()).read_segment_table(
-            _segment_read_task(storage_version="PackedParquet")
+            _segment_read_task(storage_version="StorageV1")
         )
 
 
 def test_milvus_storage_reader_rejects_missing_manifest_before_backend(monkeypatch):
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: pytest.fail("milvus-storage backend should not be loaded"),
     )
 
@@ -571,7 +768,7 @@ def test_milvus_storage_reader_wraps_backend_errors(monkeypatch):
 
     fake_milvus_storage = SimpleNamespace(Transaction=FakeTransaction)
     monkeypatch.setattr(
-        "milvus_toolkit.io.storage._load_milvus_storage",
+        "ray_milvus.io.storage._load_milvus_storage",
         lambda: fake_milvus_storage,
     )
 

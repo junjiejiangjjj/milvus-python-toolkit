@@ -1,4 +1,4 @@
-# Milvus Python Toolkit / Offline SDK 设计方案
+# ray-milvus 设计方案
 
 本文档记录 Python 项目的更高层设计方向：项目不再定位为单纯的 Python connector，而是定位为一个面向 Milvus 的 Python 功能 SDK / 离线处理 SDK。
 
@@ -9,7 +9,7 @@
 推荐项目定位：
 
 ```text
-Milvus Python Toolkit / Milvus Offline SDK
+ray-milvus
 ```
 
 它封装 Milvus / Milvus Lite 的离线数据访问、元数据解析、snapshot 处理、StorageV3 / Lite 本地数据读取、数据转换、Backfill、导入导出、校验和 inspection 等能力。
@@ -20,7 +20,7 @@ Ray、Daft 或其他 Python 数据处理项目通过 `import` 该项目，直接
 Ray / Daft / 普通 Python 项目
         |
         v
-Milvus Python Toolkit / Offline SDK
+ray-milvus
         |
         +-- Milvus / Milvus Lite metadata / schema / snapshot
         +-- Unified storage reader / writer
@@ -29,24 +29,7 @@ Milvus Python Toolkit / Offline SDK
         +-- Ray / Daft execution adapter
 ```
 
-因此项目不建议命名为：
-
-```text
-ray-milvus
-milvus-connector
-```
-
-更合适的名字包括：
-
-```text
-milvus-toolkit
-milvus-offline
-milvus-data
-milvus-dataflow
-milvus-processing
-```
-
-如果主要强调离线处理，推荐 `milvus-offline`。如果希望覆盖更广泛的 Milvus 工具能力，推荐 `milvus-toolkit`。
+历史设计曾考虑使用更通用的 `milvus-offline` 命名，但当前项目已确定为 `ray-milvus`，与 `spark-milvus` 对应。后续设计仍应保持 Milvus 语义与执行引擎解耦，避免把 core 逻辑写死在 Ray adapter 中。
 
 ## 2. 总体架构
 
@@ -55,7 +38,7 @@ milvus-processing
 推荐结构：
 
 ```text
-milvus_toolkit/
+ray_milvus/
   __init__.py
   api.py
   types.py
@@ -144,7 +127,7 @@ core 定义语义；io 负责数据接入；ops 组织离线任务；engines 负
 示例 API：
 
 ```python
-import milvus_toolkit as mt
+import ray_milvus as rm
 
 mt.read_snapshot(...)
 mt.inspect_snapshot(...)
@@ -264,26 +247,96 @@ StorageConfig = MilvusStorageConfig | MilvusLiteStorageConfig
 
 ### 3.5 `MilvusDataset`
 
-`MilvusDataset` 建议放在 `core/dataset.py`，作为 engine-neutral 数据集描述。它属于核心领域模型，不属于 `io/reader.py` 的实现细节。
+`MilvusDataset` 放在 `core/dataset.py`，作为 engine-neutral 数据集描述。它属于核心领域模型，不属于 `io/reader.py` 的实现细节。
+
+当前读取语义分三层：
+
+```text
+本地 / 通用流式读取：MilvusDataset.iter_batches(...)
+Ray Core 执行：MilvusDataset.to_ray_blocks(...)
+Ray Data 执行：MilvusDataset.to_ray_dataset(...)
+```
+
+建议对象形态：
 
 ```python
 class MilvusDataset:
-    schema: MilvusSchema
-    metadata: CollectionMetadata
-    segments: list[SegmentMetadata]
     read_plan: ReadPlan
 
-    def select(self, columns: list[str]): ...
-    def transform(self, ops: list[TransformOp]): ...
-    def to_arrow(self): ...
-    def to_pandas(self): ...
-    def to_ray(self): ...
-    def to_daft(self): ...
+    def iter_batches(self, batch_size: int | None = None) -> Iterable[pa.RecordBatch]: ...
+    def to_arrow(self) -> pa.Table: ...
+
+    def to_ray_blocks(
+        self,
+        target_block_size: int | str | None = None,
+        parallelism: int | None = None,
+    ) -> list["ray.ObjectRef[pa.Table]"]: ...
+
+    def to_ray_dataset(
+        self,
+        target_block_size: int | str | None = None,
+        parallelism: int | None = None,
+    ) -> "ray.data.Dataset": ...
 ```
 
-它用于屏蔽底层读取计划，让外部 Ray / Daft / Python 项目可以通过统一对象使用 Milvus 数据。
+`read_snapshot(...)` 只负责生成逻辑 dataset 和 `ReadPlan`，不强制选择执行引擎。用户根据场景选择：
 
-`MilvusDataset` 本身不直接实现 Ray / Daft 逻辑；`to_ray()` / `to_daft()` 只是薄封装，内部委托给 `engines.ray` / `engines.daft`。
+```python
+dataset = ray_milvus.read_snapshot(...)
+
+# 本地流式，适合 debug、小数据、普通 Python job
+for batch in dataset.iter_batches(batch_size=10_000):
+    ...
+
+# Ray Core，适合用户自己组合 ray.wait / ray.get / remote task
+blocks = dataset.to_ray_blocks(target_block_size="128MiB")
+
+# Ray Data，适合进入 Ray Data pipeline
+ray_ds = dataset.to_ray_dataset(target_block_size="128MiB")
+```
+
+`to_arrow()` 仍保留作为小数据 / 测试 / debug 的便利接口，但它会 materialize 全量数据，不应作为大 collection 的默认读取方式。
+
+#### Batch 与 Block 的职责边界
+
+本地流式读取中，用户直接拿到 `pyarrow.RecordBatch`，因此 `iter_batches(batch_size=...)` 的 `batch_size` 是用户可感知的处理粒度。
+
+Ray Core / Ray Data 中，下游用户拿到的是 `pyarrow.Table` block 或 `ray.data.Dataset` block，不是 storage reader 的中间 `RecordBatch`。因此 Ray API 不应把 `batch_size` 作为主参数；读取 batch size 属于 worker 内部实现细节，可以由框架默认决定。
+
+Ray block 是框架内部执行细节：
+
+```text
+RecordBatch -> internal block builder -> pyarrow.Table block -> Ray ObjectRef / Ray Dataset block
+```
+
+因此，组装 block 的逻辑应由 ray-milvus 内部提供，而不是让用户在 Ray job 中手写 `iter_arrow_blocks`。内部可以提供类似：
+
+```text
+ray_milvus/engines/blocks.py
+  parse_target_block_size(...)
+  iter_arrow_blocks(...)
+```
+
+但这些属于内部工具，用户 API 不直接依赖它们。
+
+`target_block_size` 是可选高级调优项，不应是必选参数。未设置时使用框架默认值，例如：
+
+```python
+DEFAULT_TARGET_BLOCK_SIZE = "128MiB"
+```
+
+第一版 block builder 策略：
+
+```text
+读取 RecordBatch
+  -> 用 batch.nbytes 估算大小
+  -> 累积到 target_block_size
+  -> flush 成 pyarrow.Table block
+```
+
+如果单个内部 batch 已超过 `target_block_size`，第一版允许生成超大 block。内部 read batch size 可以先使用框架默认值，后续如确有必要再作为高级调优项暴露，例如 `read_batch_size`，但不应成为 Ray API 的主要参数。
+
+`MilvusDataset` 本身不直接实现复杂 Ray / Daft 逻辑；`to_ray_blocks()` / `to_ray_dataset()` 是薄入口，内部委托给 `engines.ray`。这样可以在不改变用户 API 的前提下，把内部实现从 segment-level Ray task 演进到 file / row-group-level task 或 Ray Data custom datasource。
 
 ### 3.6 `ops/`
 
@@ -366,18 +419,28 @@ class ExecutionEngine:
     def execute_export(self, plan): ...
 ```
 
-Ray 项目中可以直接使用：
+Ray 项目中优先通过 `MilvusDataset` 使用：
 
 ```python
-from milvus_toolkit.engines.ray import read_snapshot_as_dataset
+dataset = ray_milvus.read_snapshot(...)
 
-ray_ds = read_snapshot_as_dataset(...)
+# Ray Core
+blocks = dataset.to_ray_blocks(target_block_size="128MiB")
+
+# Ray Data
+ray_ds = dataset.to_ray_dataset(target_block_size="128MiB")
+```
+
+`engines.ray` 也可以提供直接 import 的低层函数，但不作为普通用户首选入口：
+
+```python
+from ray_milvus.engines.ray import execute_read_plan_blocks, execute_read_plan_dataset
 ```
 
 Daft 项目中可以直接使用：
 
 ```python
-from milvus_toolkit.engines.daft import scan_snapshot
+from ray_milvus.engines.daft import scan_snapshot
 
 df = scan_snapshot(...)
 ```
@@ -396,11 +459,158 @@ engines/ray/
 Ray / Daft 应作为可选依赖：
 
 ```bash
-pip install milvus-toolkit
-pip install milvus-toolkit[ray]
-pip install milvus-toolkit[daft]
-pip install milvus-toolkit[all]
+pip install ray-milvus
+pip install ray-milvus[ray]
+pip install ray-milvus[daft]
+pip install ray-milvus[all]
 ```
+
+#### Ray Core 读取策略
+
+Ray Core 面向希望自己控制 `ray.remote`、`ray.wait`、`ray.get` 和后续 task 编排的用户。对外接口建议是：
+
+```python
+blocks = dataset.to_ray_blocks(
+    target_block_size="128MiB",
+    parallelism=None,
+)
+```
+
+返回值是：
+
+```python
+list[ray.ObjectRef[pyarrow.Table]]
+```
+
+这里的 `pyarrow.Table` 是 Ray block，而不是完整 collection。Ray Core 用户可以继续把这些 block refs 传给自己的 remote task：
+
+```python
+@ray.remote
+def process_block(block: pa.Table):
+    ...
+
+refs = [process_block.remote(block_ref) for block_ref in blocks]
+```
+
+第一版内部执行策略：
+
+```text
+driver:
+  read_snapshot(...) 生成 ReadPlan
+  -> 根据 parallelism 把 ReadPlan.tasks 分成 segment_task_group
+  -> 提交 read_segment_task_group.remote(...)
+  -> 收集 pyarrow.Table block 的 ObjectRef
+
+worker:
+  segment_task_group: tuple[SegmentReadTask, ...]
+  -> worker 内部 create_storage_reader(task.storage)
+  -> read_segment_as_batches(task, reader, batch_size=内部默认值)
+  -> internal iter_arrow_blocks(..., target_block_size=默认值或用户传入值)
+  -> 返回 / yield pyarrow.Table block refs
+```
+
+数据读取必须发生在 Ray worker 上，而不是 driver 上。driver 不应执行 `dataset.iter_batches(...)` 后再 `ray.put(...)`；这种写法会让 driver 成为 IO 和内存瓶颈。Ray API 的语义是 driver 生成计划并提交任务，worker 访问 MinIO / S3 / 本地文件 / `milvus-storage` 并生成 block。
+
+`parallelism` 控制 ray-milvus 内部提交的读取 task / task group 数量，类似 Ray Core 示例中的：
+
+```python
+futures = [read_segment_task_group.remote(group) for group in groups]
+```
+
+第一版中 group 类型可以是：
+
+```python
+segment_task_group: tuple[SegmentReadTask, ...]
+```
+
+用户不会直接接触 group。`parallelism=None` 时可以默认一个 segment 一个 task；指定 `parallelism=N` 时，框架把 `ReadPlan.tasks` 分成最多 N 个 `segment_task_group`，每个 Ray task 顺序读取自己 group 内的 segment。Ray 实际同时运行多少 task 仍由集群资源和调度器决定。
+
+Ray Core 路径应优先使用 Ray generator task：一个 segment group reader task 边读边 yield 多个 block，避免一个 task 最后返回巨大的 `list[pa.Table]`。如果 Ray 版本限制导致 generator task 不可用，应重新评估实现方案，而不是把 eager block list 作为发布级语义。
+
+并行粒度演进顺序：
+
+1. **Segment-level parallelism**：一个 `SegmentReadTask` 一个 Ray task，简单可靠，适合 segment 数量足够多的 collection。
+2. **Segment grouping**：小 segment 合并到一个 Ray task，降低 task 数量和调度开销。
+3. **File / row-group-level parallelism**：对 packed parquet 大 segment，按 parquet file 或 row group 进一步拆 task，提高少量大 segment 的并行度。
+
+无论内部粒度如何变化，对外仍保持：
+
+```python
+dataset.to_ray_blocks(target_block_size=..., parallelism=...)
+```
+
+#### Ray Data 读取策略
+
+Ray Data 面向希望进入 Ray Dataset pipeline 的用户。对外接口建议是：
+
+```python
+ray_ds = dataset.to_ray_dataset(
+    target_block_size="128MiB",
+    parallelism=None,
+)
+```
+
+Ray Data 路径应直接实现 custom datasource，不把 `to_ray_blocks() + ray.data.from_arrow_refs(...)` 作为发布级实现。项目应在 Ray Data 原生读取路径完成后再发布，因此没有必要引入一个 eager submit 的中间版本。
+
+`to_ray_dataset()` 内部应使用 Ray Data datasource 接入：
+
+```text
+dataset.to_ray_dataset(...)
+  -> ray.data.read_datasource(MilvusSnapshotDatasource(...))
+  -> Ray Data 调用 datasource 创建 ReadTask
+  -> ReadTask 在 Ray worker 上读取 segment_task_group
+  -> worker 内部 StorageReader -> RecordBatch stream -> internal block builder
+  -> pyarrow.Table blocks -> ray.data.Dataset
+```
+
+这样 `to_ray_dataset()` 更接近 Ray Data 原生 lazy execution：构造 Dataset 时不应由 ray-milvus 先 eager 提交全部读取任务；真正执行由 Ray Data 在 action / pipeline 执行阶段调度。
+
+用户可以继续使用 Ray Data：
+
+```python
+ray_ds = dataset.to_ray_dataset(target_block_size="128MiB")
+ray_ds = ray_ds.map_batches(fn, batch_size=10_000, batch_format="pyarrow")
+ray_ds.write_parquet("s3://bucket/output")
+```
+
+`MilvusSnapshotDatasource` 负责把 `ReadPlan` 转成 Ray Data read tasks：
+
+```python
+class MilvusSnapshotDatasource(Datasource):
+    read_plan: ReadPlan
+    target_block_size: int
+
+    def get_read_tasks(self, parallelism: int) -> list[ReadTask]: ...
+```
+
+每个 `ReadTask` 对应一个内部 group：
+
+```python
+segment_task_group: tuple[SegmentReadTask, ...]
+```
+
+ReadTask metadata 应尽量提供：
+
+- Arrow schema：由 `ReadPlan.projected_fields` 和 `include` metadata columns 生成。
+- 预计 rows：由 group 内 segment `row_count` 累加，缺失时允许 unknown。
+- 预计 bytes：第一版可以 unknown，后续可按字段类型 / vector dim / parquet metadata 估算。
+
+custom datasource 让 Ray Data 管理 read tasks、block metadata、parallelism、lazy execution、backpressure 和调度 locality，是 Ray Data 集成的目标实现。
+
+#### Backfill 与 shuffle 约束
+
+Ray backfill 不能把外部 backfill 表全量 broadcast 到每个 segment reader。读取层应产生可 partition / shuffle 的 Ray Dataset 或 block 流，后续按 primary key hash partition 对齐：
+
+```text
+source snapshot blocks
+  -> hash partition by primary key
+external backfill blocks
+  -> hash partition by primary key
+same partition join / merge
+  -> write StorageV3 addfield output
+```
+
+因此 Ray 读取 API 应服务于 partitioned data flow，而不是 driver 端 `concat` 或 full-table materialization。
 
 ### 3.8 `cli/`
 
@@ -414,11 +624,11 @@ cli/
 在 `main.py` 中注册子命令：
 
 ```text
-milvus-toolkit inspect ...
-milvus-toolkit backfill ...
-milvus-toolkit export ...
-milvus-toolkit import ...
-milvus-toolkit validate ...
+ray-milvus inspect ...
+ray-milvus backfill ...
+ray-milvus export ...
+ray-milvus import ...
+ray-milvus validate ...
 ```
 
 如果 CLI 变复杂，再拆：
@@ -493,7 +703,7 @@ Milvus 语义不能依赖执行引擎；执行引擎只负责调度和 DataFrame
 适合普通用户。
 
 ```python
-import milvus_toolkit as mt
+import ray_milvus as rm
 
 mt.read_snapshot(...)
 mt.backfill(...)
@@ -532,7 +742,7 @@ for task in plan.tasks:
 ### 6.1 读取 snapshot
 
 ```python
-import milvus_toolkit as mt
+import ray_milvus as rm
 
 storage = mt.StorageConfig(
     endpoint="s3.us-west-2.amazonaws.com",
@@ -558,7 +768,7 @@ pdf = dataset.to_pandas()
 ### 6.2 在 Ray 项目中使用
 
 ```python
-import milvus_toolkit as mt
+import ray_milvus as rm
 
 ray_ds = mt.read_snapshot(
     snapshot_path="s3://milvus-bucket/snapshots/foo.json",
@@ -570,7 +780,7 @@ ray_ds = mt.read_snapshot(
 或者：
 
 ```python
-from milvus_toolkit.engines.ray import read_snapshot_as_dataset
+from ray_milvus.engines.ray import read_snapshot_as_dataset
 
 ray_ds = read_snapshot_as_dataset(
     snapshot_path="s3://milvus-bucket/snapshots/foo.json",
@@ -581,7 +791,7 @@ ray_ds = read_snapshot_as_dataset(
 ### 6.3 在 Daft 项目中使用
 
 ```python
-import milvus_toolkit as mt
+import ray_milvus as rm
 
 df = mt.read_snapshot(
     snapshot_path="s3://milvus-bucket/snapshots/foo.json",
@@ -593,7 +803,7 @@ df = mt.read_snapshot(
 或者：
 
 ```python
-from milvus_toolkit.engines.daft import scan_snapshot
+from ray_milvus.engines.daft import scan_snapshot
 
 df = scan_snapshot(
     snapshot_path="s3://milvus-bucket/snapshots/foo.json",
@@ -670,7 +880,7 @@ result = mt.transform_snapshot(
 第一阶段不建议一次实现全部模块。推荐先完成最小闭环：
 
 ```text
-milvus_toolkit/
+ray_milvus/
   api.py
   types.py
   errors.py
@@ -754,7 +964,7 @@ milvus_toolkit/
 但如果项目会集成更多 Milvus 功能，并被 Ray、Daft 或其他 Python 项目直接 import 使用，则更推荐设计为：
 
 ```text
-Milvus Python Toolkit / Milvus Offline SDK
+ray-milvus
 ```
 
 核心结构应保持紧凑：

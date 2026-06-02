@@ -6,12 +6,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import milvus_toolkit as mt
-from milvus_toolkit.core.planner import plan_snapshot_read
-from milvus_toolkit.engines.local import execute_read_plan
-from milvus_toolkit.errors import StorageError
-from milvus_toolkit.io.object_store import load_snapshot_json
-from milvus_toolkit.types import StorageConfig
+import ray_milvus as mt
+from ray_milvus.core.planner import plan_snapshot_read
+from ray_milvus.engines.local import execute_read_plan
+from ray_milvus.errors import StorageError
+from ray_milvus.io.object_store import load_snapshot_json
+from ray_milvus.types import StorageConfig
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "snapshot_storage_v3.json"
 
@@ -83,7 +83,7 @@ def test_write_and_read_snapshot_with_real_milvus_storage_smoke(tmp_path):
     if os.environ.get("MILVUS_STORAGE_READ_SMOKE") != "1":
         pytest.skip("set MILVUS_STORAGE_READ_SMOKE=1 after scripts/install_dev.sh")
 
-    pytest.importorskip("milvus_toolkit._vendor.milvus_storage")
+    pytest.importorskip("ray_milvus._vendor.milvus_storage")
     storage_path = tmp_path / "segment-10"
     toolkit_schema = {
         "name": "demo_collection",
@@ -113,7 +113,8 @@ def test_write_and_read_snapshot_with_real_milvus_storage_smoke(tmp_path):
     )
     storage = mt.StorageConfig(storage_type="local", root_path=str(tmp_path))
 
-    segment = mt.write_segment(
+    snapshot_path = tmp_path / "snapshot.json"
+    snapshot = mt.write_snapshot(
         table,
         toolkit_schema,
         storage,
@@ -122,8 +123,7 @@ def test_write_and_read_snapshot_with_real_milvus_storage_smoke(tmp_path):
         partition_id=1,
         manifest_version="v1",
     )
-    snapshot_path = tmp_path / "snapshot.json"
-    mt.create_snapshot(toolkit_schema, [segment], output_path=snapshot_path)
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
     result = mt.read_snapshot(
         str(snapshot_path),
@@ -140,12 +140,12 @@ def test_write_and_read_snapshot_with_real_milvus_storage_smoke(tmp_path):
 
 
 
-def test_cli_write_segment_with_real_milvus_storage_smoke(tmp_path, capsys):
+def test_cli_write_native_segment_with_real_milvus_storage_smoke(tmp_path, capsys):
     if os.environ.get("MILVUS_STORAGE_READ_SMOKE") != "1":
         pytest.skip("set MILVUS_STORAGE_READ_SMOKE=1 after scripts/install_dev.sh")
 
-    pytest.importorskip("milvus_toolkit._vendor.milvus_storage")
-    from milvus_toolkit.cli.main import main
+    pytest.importorskip("ray_milvus._vendor.milvus_storage")
+    from ray_milvus.cli.main import main
 
     input_path = tmp_path / "input.parquet"
     schema_path = tmp_path / "schema.json"
@@ -186,7 +186,7 @@ def test_cli_write_segment_with_real_milvus_storage_smoke(tmp_path, capsys):
 
     exit_code = main(
         [
-            "write-segment",
+            "write-native-segment",
             "--input",
             str(input_path),
             "--schema-file",
@@ -232,7 +232,7 @@ def test_backfill_snapshot_with_real_milvus_storage_smoke(tmp_path):
     if os.environ.get("MILVUS_STORAGE_READ_SMOKE") != "1":
         pytest.skip("set MILVUS_STORAGE_READ_SMOKE=1 after scripts/install_dev.sh")
 
-    pytest.importorskip("milvus_toolkit._vendor.milvus_storage")
+    pytest.importorskip("ray_milvus._vendor.milvus_storage")
     storage_path = tmp_path / "segment-10"
     source_schema = {
         "name": "demo_collection",
@@ -255,16 +255,16 @@ def test_backfill_snapshot_with_real_milvus_storage_smoke(tmp_path):
     )
     storage = mt.StorageConfig(storage_type="local", root_path=str(tmp_path))
     snapshot_path = tmp_path / "snapshot.json"
-    mt.write_snapshot(
+    snapshot = mt.write_snapshot(
         source,
         source_schema,
         storage,
         segment_path=str(storage_path),
         segment_id=10,
-        output_path=snapshot_path,
         collection_name="demo_collection",
         partition_id=1,
     )
+    snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
 
     backfill_schema = {
         "name": "demo_collection",
@@ -311,7 +311,7 @@ def test_read_snapshot_with_real_milvus_storage_smoke(tmp_path):
     if os.environ.get("MILVUS_STORAGE_READ_SMOKE") != "1":
         pytest.skip("set MILVUS_STORAGE_READ_SMOKE=1 after scripts/install_dev.sh")
 
-    milvus_storage = pytest.importorskip("milvus_toolkit._vendor.milvus_storage")
+    milvus_storage = pytest.importorskip("ray_milvus._vendor.milvus_storage")
     storage_path = tmp_path / "segment-10"
     schema = pa.schema(
         [

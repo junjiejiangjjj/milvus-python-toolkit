@@ -3,25 +3,110 @@ import json
 import pyarrow as pa
 import pytest
 
-import milvus_toolkit as mt
-from milvus_toolkit.io.storage import SegmentWriteResult
+import ray_milvus as mt
+from ray_milvus.io.storage import SegmentWriteResult
 
 
 def test_public_api_exports_mvp_symbols():
     storage = mt.StorageConfig(endpoint="localhost:9000", bucket="bucket")
 
     assert storage.endpoint == "localhost:9000"
+    assert mt.MilvusConfig is not None
+    assert mt.RayMilvus is not None
     assert mt.backfill_snapshot is not None
     assert mt.read_snapshot is not None
     assert mt.create_snapshot is not None
     assert mt.create_snapshot_from_milvus is not None
-    assert mt.create_snapshot_from_milvus_snapshot is not None
     assert mt.import_milvus_snapshot is not None
+    assert mt.import_native_milvus_snapshot is not None
     assert mt.inspect_snapshot is not None
-    assert mt.write_segment is not None
+    assert not hasattr(mt, "write_segment")
     assert mt.write_snapshot is not None
     assert mt.write_snapshot_segments is not None
     assert issubclass(mt.UnsupportedSegmentError, mt.MilvusToolkitError)
+
+
+
+def test_ray_milvus_facade_uses_default_storage(monkeypatch):
+    calls = []
+    storage = mt.StorageConfig(endpoint="localhost:9000", bucket="bucket")
+
+    def read_snapshot(snapshot_path, **kwargs):
+        calls.append((snapshot_path, kwargs))
+        return "dataset"
+
+    monkeypatch.setattr("ray_milvus.api.read_snapshot", read_snapshot)
+
+    ray = mt.RayMilvus(storage=storage)
+    dataset = ray.read_snapshot("snapshot.json", columns=["id"], include=["segment_id"])
+
+    assert dataset == "dataset"
+    assert calls == [
+        (
+            "snapshot.json",
+            {
+                "storage": storage,
+                "columns": ["id"],
+                "include": ["segment_id"],
+                "manifest_version": None,
+            },
+        )
+    ]
+
+
+
+def test_ray_milvus_facade_uses_milvus_config(monkeypatch):
+    calls = []
+    storage = mt.StorageConfig(endpoint="localhost:9000", bucket="bucket")
+    milvus = mt.MilvusConfig(
+        uri="http://localhost:19530",
+        token="secret",
+        db_name="default",
+    )
+
+    def create_snapshot_from_milvus(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"snapshot_name": kwargs["snapshot_name"], "segments": []}
+
+    monkeypatch.setattr(
+        "ray_milvus.api.create_snapshot_from_milvus",
+        create_snapshot_from_milvus,
+    )
+
+    ray = mt.RayMilvus(storage=storage, milvus=milvus)
+    payload = ray.create_snapshot_from_milvus(
+        collection_name="demo_collection",
+        snapshot_name="snapshot-1",
+    )
+
+    assert payload["snapshot_name"] == "snapshot-1"
+    assert calls == [
+        (
+            ("http://localhost:19530", "demo_collection"),
+            {
+                "snapshot_name": "snapshot-1",
+                "output_path": None,
+                "storage": storage,
+                "auto_snapshot_name": False,
+                "token": "secret",
+                "user": None,
+                "password": None,
+                "db_name": "default",
+                "description": None,
+                "compaction_protection_seconds": None,
+                "overwrite": False,
+                "pretty": True,
+            },
+        )
+    ]
+
+
+
+def test_ray_milvus_facade_requires_milvus_config():
+    ray = mt.RayMilvus()
+
+    with pytest.raises(mt.ConfigError, match="MilvusConfig"):
+        ray.import_milvus_snapshot("demo_collection", "snapshot-1")
 
 
 def test_create_snapshot_from_memory():
@@ -61,14 +146,21 @@ def test_create_snapshot_from_files_and_overwrite_guard(tmp_path):
     mt.create_snapshot(schema_path, segments_path, output_path=output_path, overwrite=True)
 
 
-def test_create_snapshot_from_milvus_snapshot_uses_snapshot_location(monkeypatch, tmp_path):
+def test_create_snapshot_from_milvus_uses_snapshot_location(monkeypatch, tmp_path):
     output_path = tmp_path / "snapshot.json"
 
-    def create_snapshot_for_read(**kwargs):
-        assert kwargs["uri"] == "http://localhost:19530"
-        assert kwargs["collection_name"] == "demo_collection"
-        assert kwargs["snapshot_name"] == "snapshot-1"
-        return type("SnapshotLocation", (), {"location": "s3://bucket/snapshot.json"})()
+    class FakeMilvusService:
+        def __init__(self, **kwargs):
+            assert kwargs["uri"] == "http://localhost:19530"
+
+        def create_snapshot_for_read(self, **kwargs):
+            assert kwargs["collection_name"] == "demo_collection"
+            assert kwargs["snapshot_name"] == "snapshot-1"
+            return type(
+                "SnapshotLocation",
+                (),
+                {"name": "snapshot-1", "location": "s3://bucket/snapshot.json"},
+            )()
 
     def load_snapshot_json(path):
         assert path == "s3://bucket/snapshot.json"
@@ -80,18 +172,15 @@ def test_create_snapshot_from_milvus_snapshot_uses_snapshot_location(monkeypatch
                     "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
                 },
             },
-            "storagev2_manifest_list": [
-                {
-                    "segmentID": 10,
-                    "manifest": json.dumps({"ver": 1, "base_path": "files/insert_log/1/2/10"}),
-                }
-            ],
+            "snapshot_info": {"collection_id": "1", "partition_ids": ["2"]},
+            "manifest_list": ["files/snapshots/1/manifests/99/10.avro"],
+            "segment_ids": ["10"],
         }
 
-    monkeypatch.setattr("milvus_toolkit.api.create_snapshot_for_read", create_snapshot_for_read)
-    monkeypatch.setattr("milvus_toolkit.api.load_snapshot_json", load_snapshot_json)
+    monkeypatch.setattr("ray_milvus.api.MilvusService", FakeMilvusService)
+    monkeypatch.setattr("ray_milvus.api.load_snapshot_json", load_snapshot_json)
 
-    payload = mt.create_snapshot_from_milvus_snapshot(
+    payload = mt.create_snapshot_from_milvus(
         "http://localhost:19530",
         "demo_collection",
         "snapshot-1",
@@ -99,20 +188,29 @@ def test_create_snapshot_from_milvus_snapshot_uses_snapshot_location(monkeypatch
     )
 
     assert payload["segments"][0]["manifest_path"] == "files/insert_log/1/2/10"
+    assert payload["snapshot_name"] == "snapshot-1"
     written = json.loads(output_path.read_text(encoding="utf-8"))
     assert written["collection_name"] == "demo_collection"
+    assert written["snapshot_name"] == "snapshot-1"
 
 
 
-def test_create_snapshot_from_milvus_snapshot_uses_storage_for_relative_location(
+def test_create_snapshot_from_milvus_uses_storage_for_relative_location(
     monkeypatch,
     tmp_path,
 ):
     output_path = tmp_path / "snapshot.json"
 
-    def create_snapshot_for_read(**kwargs):
-        assert kwargs["uri"] == "http://localhost:19530"
-        return type("SnapshotLocation", (), {"location": "files/snapshot.json"})()
+    class FakeMilvusService:
+        def __init__(self, **kwargs):
+            assert kwargs["uri"] == "http://localhost:19530"
+
+        def create_snapshot_for_read(self, **kwargs):
+            return type(
+                "SnapshotLocation",
+                (),
+                {"name": kwargs["snapshot_name"], "location": "files/snapshot.json"},
+            )()
 
     def load_snapshot_json_from_storage(path, **kwargs):
         assert path == "files/snapshot.json"
@@ -127,13 +225,13 @@ def test_create_snapshot_from_milvus_snapshot_uses_storage_for_relative_location
             "segments": [{"segment_id": 10, "manifest_path": "files/insert_log/1/2/10"}],
         }
 
-    monkeypatch.setattr("milvus_toolkit.api.create_snapshot_for_read", create_snapshot_for_read)
+    monkeypatch.setattr("ray_milvus.api.MilvusService", FakeMilvusService)
     monkeypatch.setattr(
-        "milvus_toolkit.api.load_snapshot_json_from_storage",
+        "ray_milvus.api.load_snapshot_json_from_storage",
         load_snapshot_json_from_storage,
     )
 
-    payload = mt.create_snapshot_from_milvus_snapshot(
+    payload = mt.create_snapshot_from_milvus(
         "http://localhost:19530",
         "demo_collection",
         "snapshot-1",
@@ -146,34 +244,117 @@ def test_create_snapshot_from_milvus_snapshot_uses_storage_for_relative_location
     )
 
     assert payload["segments"][0]["manifest_path"] == "files/insert_log/1/2/10"
+    assert payload["snapshot_name"] == "snapshot-1"
 
 
 
-def test_create_snapshot_from_milvus_uses_loaded_schema(monkeypatch, tmp_path):
-    output_path = tmp_path / "snapshot.json"
+def test_create_snapshot_from_milvus_generates_snapshot_name(monkeypatch):
+    class FakeMilvusService:
+        def __init__(self, **kwargs):
+            assert kwargs["uri"] == "http://localhost:19530"
 
-    def load_schema(**kwargs):
-        assert kwargs["uri"] == "http://localhost:19530"
-        assert kwargs["collection_name"] == "demo_collection"
-        assert kwargs["token"] == "secret"
-        return {"name": "demo", "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}]}
+        def create_snapshot_for_read(self, **kwargs):
+            assert kwargs["collection_name"] == "demo-collection"
+            assert kwargs["snapshot_name"].startswith("ray_milvus_demo_collection_")
+            return type(
+                "SnapshotLocation",
+                (),
+                {"name": kwargs["snapshot_name"], "location": "s3://bucket/snapshot.json"},
+            )()
 
-    monkeypatch.setattr("milvus_toolkit.api.load_collection_schema", load_schema)
+    def load_snapshot_json(path):
+        assert path == "s3://bucket/snapshot.json"
+        return {
+            "collection_schema": {
+                "name": "demo-collection",
+                "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+            },
+            "segments": [{"segment_id": 10, "manifest_path": "files/insert_log/1/2/10"}],
+        }
+
+    monkeypatch.setattr("ray_milvus.api.MilvusService", FakeMilvusService)
+    monkeypatch.setattr("ray_milvus.api.load_snapshot_json", load_snapshot_json)
 
     payload = mt.create_snapshot_from_milvus(
         "http://localhost:19530",
+        "demo-collection",
+        auto_snapshot_name=True,
+    )
+
+    assert payload["snapshot_name"].startswith("ray_milvus_demo_collection_")
+
+
+
+def test_create_snapshot_from_milvus_validates_snapshot_name_options():
+    with pytest.raises(mt.ConfigError, match="snapshot_name cannot be set"):
+        mt.create_snapshot_from_milvus(
+            "http://localhost:19530",
+            "demo_collection",
+            snapshot_name="snapshot-1",
+            auto_snapshot_name=True,
+        )
+
+    with pytest.raises(mt.ConfigError, match="snapshot_name is required"):
+        mt.create_snapshot_from_milvus("http://localhost:19530", "demo_collection")
+
+
+
+def test_import_milvus_snapshot_uses_existing_snapshot_location(monkeypatch, tmp_path):
+    output_path = tmp_path / "snapshot.json"
+
+    class FakeMilvusService:
+        def __init__(self, **kwargs):
+            assert kwargs["uri"] == "http://localhost:19530"
+            assert kwargs["token"] == "secret"
+
+        def describe_snapshot_for_read(self, **kwargs):
+            assert kwargs == {
+                "collection_name": "demo_collection",
+                "snapshot_name": "snapshot-1",
+            }
+            return type(
+                "SnapshotLocation",
+                (),
+                {"name": "snapshot-1", "location": "s3://bucket/snapshot.json"},
+            )()
+
+    def load_snapshot_json(path):
+        assert path == "s3://bucket/snapshot.json"
+        return {
+            "collection_schema": {
+                "name": "demo_collection",
+                "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+            },
+            "segments": [{"segment_id": 10, "manifest_path": "files/insert_log/1/2/10"}],
+        }
+
+    monkeypatch.setattr("ray_milvus.api.MilvusService", FakeMilvusService)
+    monkeypatch.setattr("ray_milvus.api.load_snapshot_json", load_snapshot_json)
+
+    payload = mt.import_milvus_snapshot(
+        "http://localhost:19530",
         "demo_collection",
-        [{"segment_id": 10, "storage_version": "StorageV3", "manifest_path": "segment-10"}],
+        "snapshot-1",
         output_path=output_path,
         token="secret",
     )
 
-    assert payload["collection_name"] == "demo_collection"
+    assert payload["snapshot_name"] == "snapshot-1"
+    assert payload["segments"][0]["segment_id"] == 10
     written = json.loads(output_path.read_text(encoding="utf-8"))
     assert written["collection_name"] == "demo_collection"
+    with pytest.raises(mt.ConfigError, match="already exists"):
+        mt.import_milvus_snapshot(
+            "http://localhost:19530",
+            "demo_collection",
+            "snapshot-1",
+            output_path=output_path,
+            token="secret",
+        )
 
 
-def test_import_milvus_snapshot_writes_output(monkeypatch, tmp_path):
+
+def test_import_native_milvus_snapshot_writes_output(monkeypatch, tmp_path):
     output_path = tmp_path / "snapshot.json"
 
     def build_payload(**kwargs):
@@ -190,20 +371,20 @@ def test_import_milvus_snapshot_writes_output(monkeypatch, tmp_path):
         }
 
     monkeypatch.setattr(
-        "milvus_toolkit.api.build_snapshot_payload_from_native_snapshot",
+        "ray_milvus.api.build_snapshot_payload_from_native_snapshot",
         build_payload,
     )
 
-    payload = mt.import_milvus_snapshot("metadata.json", output_path=output_path)
+    payload = mt.import_native_milvus_snapshot("metadata.json", output_path=output_path)
 
     assert payload["segments"][0]["segment_id"] == 10
     written = json.loads(output_path.read_text(encoding="utf-8"))
     assert written["collection_name"] == "demo_collection"
     with pytest.raises(mt.ConfigError, match="already exists"):
-        mt.import_milvus_snapshot("metadata.json", output_path=output_path)
+        mt.import_native_milvus_snapshot("metadata.json", output_path=output_path)
 
 
-def test_write_snapshot_writes_segment_and_snapshot(monkeypatch, tmp_path):
+def test_write_snapshot_writes_segment_and_returns_snapshot(monkeypatch):
     calls = {}
 
     class FakeWriter:
@@ -214,9 +395,8 @@ def test_write_snapshot_writes_segment_and_snapshot(monkeypatch, tmp_path):
             calls["mode"] = mode
             return SegmentWriteResult(["group-a"], "7")
 
-    monkeypatch.setattr("milvus_toolkit.api.create_storage_writer", lambda storage: FakeWriter())
+    monkeypatch.setattr("ray_milvus.api.create_storage_writer", lambda storage: FakeWriter())
     table = pa.table({"id": [1, 2]})
-    snapshot_path = tmp_path / "snapshot.json"
 
     snapshot = mt.write_snapshot(
         table,
@@ -224,7 +404,6 @@ def test_write_snapshot_writes_segment_and_snapshot(monkeypatch, tmp_path):
         mt.StorageConfig(storage_type="local", root_path="/tmp/storage"),
         segment_path="segments/10",
         segment_id=10,
-        output_path=snapshot_path,
         collection_name="demo_collection",
         partition_id=1,
         manifest_version="v1",
@@ -237,8 +416,7 @@ def test_write_snapshot_writes_segment_and_snapshot(monkeypatch, tmp_path):
     assert snapshot["collection_name"] == "demo_collection"
     assert snapshot["segments"][0]["row_count"] == 2
     assert snapshot["segments"][0]["manifest_version"] == "v1"
-    written = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    assert written["segments"][0]["manifest_path"] == "segments/10"
+    assert snapshot["segments"][0]["manifest_path"] == "segments/10"
 
 
 
@@ -295,8 +473,8 @@ def test_backfill_snapshot_merges_and_writes_addfield_segments(monkeypatch, tmp_
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr("milvus_toolkit.api.read_snapshot", read_snapshot)
-    monkeypatch.setattr("milvus_toolkit.api.create_storage_writer", lambda storage: FakeWriter())
+    monkeypatch.setattr("ray_milvus.api.read_snapshot", read_snapshot)
+    monkeypatch.setattr("ray_milvus.api.create_storage_writer", lambda storage: FakeWriter())
     output_path = tmp_path / "snapshot.json"
 
     snapshot = mt.backfill_snapshot(
@@ -362,7 +540,7 @@ def test_backfill_snapshot_replace_and_overwrite_modes(monkeypatch, tmp_path):
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr("milvus_toolkit.api.read_snapshot", lambda *args, **kwargs: FakeDataset())
+    monkeypatch.setattr("ray_milvus.api.read_snapshot", lambda *args, **kwargs: FakeDataset())
     captured = []
 
     class FakeWriter:
@@ -370,7 +548,7 @@ def test_backfill_snapshot_replace_and_overwrite_modes(monkeypatch, tmp_path):
             captured.append(table.to_pydict())
             return SegmentWriteResult(["group-a"], "1")
 
-    monkeypatch.setattr("milvus_toolkit.api.create_storage_writer", lambda storage: FakeWriter())
+    monkeypatch.setattr("ray_milvus.api.create_storage_writer", lambda storage: FakeWriter())
     schema = {
         "name": "demo",
         "fields": [
@@ -409,7 +587,7 @@ def test_backfill_snapshot_rejects_unknown_mode(monkeypatch):
         def to_arrow(self):
             return pa.table({"id": [1], "segment_id": [10], "row_offset": [0]})
 
-    monkeypatch.setattr("milvus_toolkit.api.read_snapshot", lambda *args, **kwargs: FakeDataset())
+    monkeypatch.setattr("ray_milvus.api.read_snapshot", lambda *args, **kwargs: FakeDataset())
 
     with pytest.raises(mt.ConfigError, match="Unsupported backfill mode"):
         mt.backfill_snapshot(
@@ -438,8 +616,7 @@ def test_write_snapshot_segments_writes_multiple_segments(monkeypatch, tmp_path)
             calls.append((table, schema, segment_path, mode))
             return SegmentWriteResult([f"group-{segment_path}"], str(len(calls)))
 
-    monkeypatch.setattr("milvus_toolkit.api.create_storage_writer", lambda storage: FakeWriter())
-    snapshot_path = tmp_path / "snapshot.json"
+    monkeypatch.setattr("ray_milvus.api.create_storage_writer", lambda storage: FakeWriter())
 
     snapshot = mt.write_snapshot_segments(
         [
@@ -458,7 +635,6 @@ def test_write_snapshot_segments_writes_multiple_segments(monkeypatch, tmp_path)
         ],
         {"name": "demo", "fields": [{"name": "id", "field_id": 100, "data_type": "Int64"}]},
         mt.StorageConfig(storage_type="local", root_path="/tmp/storage"),
-        output_path=snapshot_path,
         collection_name="demo_collection",
     )
 
@@ -483,8 +659,6 @@ def test_write_snapshot_segments_writes_multiple_segments(monkeypatch, tmp_path)
             "manifest_version": "v3",
         },
     ]
-    written = json.loads(snapshot_path.read_text(encoding="utf-8"))
-    assert written["segments"][1]["segment_id"] == 11
 
 
 
@@ -496,7 +670,7 @@ def test_write_snapshot_segments_passes_addfield_mode(monkeypatch):
             calls.append((segment_path, mode))
             return SegmentWriteResult(["group-a"], "7")
 
-    monkeypatch.setattr("milvus_toolkit.api.create_storage_writer", lambda storage: FakeWriter())
+    monkeypatch.setattr("ray_milvus.api.create_storage_writer", lambda storage: FakeWriter())
 
     mt.write_snapshot_segments(
         [
@@ -519,7 +693,7 @@ def test_write_snapshot_segments_passes_addfield_mode(monkeypatch):
 
 def test_write_snapshot_segments_requires_segment_fields(monkeypatch):
     monkeypatch.setattr(
-        "milvus_toolkit.api.create_storage_writer",
+        "ray_milvus.api.create_storage_writer",
         lambda storage: pytest.fail("writer should not be created"),
     )
 
@@ -532,7 +706,7 @@ def test_write_snapshot_segments_requires_segment_fields(monkeypatch):
 
 
 
-def test_write_segment_returns_snapshot_segment_metadata(monkeypatch):
+def test_internal_write_segment_returns_snapshot_segment_metadata(monkeypatch):
     calls = {}
 
     class FakeWriter:
@@ -543,10 +717,12 @@ def test_write_segment_returns_snapshot_segment_metadata(monkeypatch):
             calls["mode"] = mode
             return SegmentWriteResult(["group-a"], "7")
 
-    monkeypatch.setattr("milvus_toolkit.api.create_storage_writer", lambda storage: FakeWriter())
+    monkeypatch.setattr("ray_milvus.api.create_storage_writer", lambda storage: FakeWriter())
     table = pa.table({"id": [1, 2]})
 
-    segment = mt.write_segment(
+    from ray_milvus.api import _write_segment
+
+    segment = _write_segment(
         table,
         {"name": "demo", "fields": [{"name": "id", "field_id": 100, "data_type": "Int64"}]},
         mt.StorageConfig(storage_type="local", root_path="/tmp/storage"),
@@ -568,7 +744,7 @@ def test_write_segment_returns_snapshot_segment_metadata(monkeypatch):
         "manifest_version": "v1",
     }
 
-    segment = mt.write_segment(
+    segment = _write_segment(
         table,
         {"name": "demo", "fields": [{"name": "id", "field_id": 100, "data_type": "Int64"}]},
         mt.StorageConfig(storage_type="local", root_path="/tmp/storage"),

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from milvus_toolkit.errors import UnsupportedFeatureError
-from milvus_toolkit.types import StorageConfig
+from ray_milvus.errors import UnsupportedFeatureError
+from ray_milvus.types import StorageConfig
 
 from .plans import ReadPlan, SegmentReadTask
 from .schema import project_fields

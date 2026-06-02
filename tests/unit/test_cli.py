@@ -4,7 +4,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from milvus_toolkit.cli.main import main
+from ray_milvus.cli.main import main
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "snapshot_storage_v3.json"
 
@@ -12,7 +12,8 @@ FIXTURE = Path(__file__).parents[1] / "fixtures" / "snapshot_storage_v3.json"
 def test_cli_help(capsys):
     assert main(["--help"]) == 0
     output = capsys.readouterr().out
-    assert "milvus-toolkit" in output
+    assert "ray-milvus" in output
+
 
 
 def test_cli_inspect_json(capsys):
@@ -96,22 +97,20 @@ def test_cli_create_snapshot_reports_errors(tmp_path, capsys):
     assert "error:" in captured.err
 
 
-def test_cli_create_snapshot_from_milvus(tmp_path, capsys, monkeypatch):
-    segments_path = tmp_path / "segments.json"
-    snapshot_path = tmp_path / "snapshot.json"
-    segments_path.write_text(
-        json.dumps(
-            [{"segment_id": 10, "storage_version": "StorageV3", "manifest_path": "segment-10"}]
-        ),
-        encoding="utf-8",
-    )
+def test_cli_import_milvus_snapshot(tmp_path, capsys, monkeypatch):
+    output_path = tmp_path / "snapshot.json"
 
-    def create_snapshot_from_milvus(**kwargs):
+    def import_milvus_snapshot(**kwargs):
         assert kwargs["uri"] == "http://localhost:19530"
         assert kwargs["collection_name"] == "demo_collection"
+        assert kwargs["snapshot_name"] == "snapshot-1"
+        assert kwargs["output_path"] == str(output_path)
         assert kwargs["token"] == "secret"
+        assert kwargs["storage"].endpoint == "localhost:9000"
+        assert kwargs["storage"].bucket == "bucket"
         return {
             "collection_name": "demo_collection",
+            "snapshot_name": "snapshot-1",
             "collection_schema": {
                 "name": "demo_collection",
                 "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
@@ -119,53 +118,38 @@ def test_cli_create_snapshot_from_milvus(tmp_path, capsys, monkeypatch):
             "segments": [{"segment_id": 10}],
         }
 
-    monkeypatch.setattr("milvus_toolkit.create_snapshot_from_milvus", create_snapshot_from_milvus)
+    monkeypatch.setattr("ray_milvus.import_milvus_snapshot", import_milvus_snapshot)
 
     exit_code = main(
         [
-            "create-snapshot",
-            "--schema-from-milvus",
+            "import-milvus-snapshot",
             "--uri",
             "http://localhost:19530",
             "--collection-name",
             "demo_collection",
-            "--segments-file",
-            str(segments_path),
+            "--snapshot-name",
+            "snapshot-1",
             "--output",
-            str(snapshot_path),
+            str(output_path),
             "--token",
             "secret",
+            "--s3-endpoint",
+            "localhost:9000",
+            "--s3-bucket",
+            "bucket",
         ]
     )
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Created snapshot" in output
+    assert "Imported Milvus snapshot snapshot-1" in output
 
 
-def test_cli_create_snapshot_from_milvus_requires_uri(tmp_path, capsys):
-    exit_code = main(
-        [
-            "create-snapshot",
-            "--schema-from-milvus",
-            "--collection-name",
-            "demo_collection",
-            "--segments-file",
-            str(tmp_path / "segments.json"),
-            "--output",
-            str(tmp_path / "snapshot.json"),
-        ]
-    )
 
-    captured = capsys.readouterr()
-    assert exit_code == 1
-    assert "--uri is required" in captured.err
-
-
-def test_cli_import_milvus_snapshot(tmp_path, capsys, monkeypatch):
+def test_cli_import_native_milvus_snapshot(tmp_path, capsys, monkeypatch):
     output_path = tmp_path / "snapshot.json"
 
-    def import_milvus_snapshot(**kwargs):
+    def import_native_milvus_snapshot(**kwargs):
         assert kwargs["metadata_path"] == "metadata.json"
         assert kwargs["manifest_dir"] == "manifests"
         assert kwargs["output_path"] == str(output_path)
@@ -178,11 +162,11 @@ def test_cli_import_milvus_snapshot(tmp_path, capsys, monkeypatch):
             "segments": [{"segment_id": 10}],
         }
 
-    monkeypatch.setattr("milvus_toolkit.import_milvus_snapshot", import_milvus_snapshot)
+    monkeypatch.setattr("ray_milvus.import_native_milvus_snapshot", import_native_milvus_snapshot)
 
     exit_code = main(
         [
-            "import-milvus-snapshot",
+            "import-native-milvus-snapshot",
             "--metadata",
             "metadata.json",
             "--manifest-dir",
@@ -194,13 +178,13 @@ def test_cli_import_milvus_snapshot(tmp_path, capsys, monkeypatch):
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Imported Milvus snapshot" in output
+    assert "Imported native Milvus snapshot" in output
 
 
 def test_cli_create_milvus_snapshot(tmp_path, capsys, monkeypatch):
     output_path = tmp_path / "snapshot.json"
 
-    def create_snapshot_from_milvus_snapshot(**kwargs):
+    def create_snapshot_from_milvus(**kwargs):
         assert kwargs["uri"] == "http://localhost:19530"
         assert kwargs["collection_name"] == "demo_collection"
         assert kwargs["snapshot_name"] == "snapshot-1"
@@ -208,6 +192,7 @@ def test_cli_create_milvus_snapshot(tmp_path, capsys, monkeypatch):
         assert kwargs["token"] == "secret"
         return {
             "collection_name": "demo_collection",
+            "snapshot_name": kwargs["snapshot_name"],
             "collection_schema": {
                 "name": "demo_collection",
                 "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
@@ -216,8 +201,8 @@ def test_cli_create_milvus_snapshot(tmp_path, capsys, monkeypatch):
         }
 
     monkeypatch.setattr(
-        "milvus_toolkit.create_snapshot_from_milvus_snapshot",
-        create_snapshot_from_milvus_snapshot,
+        "ray_milvus.create_snapshot_from_milvus",
+        create_snapshot_from_milvus,
     )
 
     exit_code = main(
@@ -242,10 +227,91 @@ def test_cli_create_milvus_snapshot(tmp_path, capsys, monkeypatch):
 
 
 
-def test_cli_import_milvus_snapshot_requires_structured_ids(tmp_path, capsys):
+def test_cli_create_milvus_snapshot_with_auto_name(tmp_path, capsys, monkeypatch):
+    output_path = tmp_path / "snapshot.json"
+
+    def create_snapshot_from_milvus(**kwargs):
+        assert kwargs["snapshot_name"] is None
+        assert kwargs["auto_snapshot_name"] is True
+        return {
+            "collection_name": "demo_collection",
+            "snapshot_name": "ray_milvus_demo_collection_auto",
+            "collection_schema": {
+                "name": "demo_collection",
+                "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+            },
+            "segments": [{"segment_id": 10}],
+        }
+
+    monkeypatch.setattr(
+        "ray_milvus.create_snapshot_from_milvus",
+        create_snapshot_from_milvus,
+    )
+
     exit_code = main(
         [
-            "import-milvus-snapshot",
+            "create-milvus-snapshot",
+            "--uri",
+            "http://localhost:19530",
+            "--collection-name",
+            "demo_collection",
+            "--auto-snapshot-name",
+            "--output",
+            str(output_path),
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Created Milvus snapshot ray_milvus_demo_collection_auto" in output
+
+
+
+def test_cli_create_milvus_snapshot_rejects_name_conflict(tmp_path, capsys):
+    exit_code = main(
+        [
+            "create-milvus-snapshot",
+            "--uri",
+            "http://localhost:19530",
+            "--collection-name",
+            "demo_collection",
+            "--snapshot-name",
+            "snapshot-1",
+            "--auto-snapshot-name",
+            "--output",
+            str(tmp_path / "snapshot.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--snapshot-name cannot be used" in captured.err
+
+
+
+def test_cli_create_milvus_snapshot_requires_name_or_auto(tmp_path, capsys):
+    exit_code = main(
+        [
+            "create-milvus-snapshot",
+            "--uri",
+            "http://localhost:19530",
+            "--collection-name",
+            "demo_collection",
+            "--output",
+            str(tmp_path / "snapshot.json"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "--snapshot-name is required" in captured.err
+
+
+
+def test_cli_import_native_milvus_snapshot_requires_structured_ids(tmp_path, capsys):
+    exit_code = main(
+        [
+            "import-native-milvus-snapshot",
             "--snapshot-root",
             "snapshots",
             "--output",
@@ -259,7 +325,7 @@ def test_cli_import_milvus_snapshot_requires_structured_ids(tmp_path, capsys):
 
 
 
-def test_cli_write_segment_outputs_metadata(tmp_path, capsys, monkeypatch):
+def test_cli_write_native_segment_outputs_metadata(tmp_path, capsys, monkeypatch):
     input_path = tmp_path / "input.parquet"
     schema_path = tmp_path / "schema.json"
     output_path = tmp_path / "segment.json"
@@ -271,14 +337,15 @@ def test_cli_write_segment_outputs_metadata(tmp_path, capsys, monkeypatch):
         encoding="utf-8",
     )
 
-    def write_segment(
+    def write_snapshot(
         table,
         schema,
         storage,
         segment_path,
         segment_id,
-        partition_id,
-        manifest_version,
+        collection_name=None,
+        partition_id=None,
+        manifest_version=None,
     ):
         assert table.num_rows == 2
         assert schema["name"] == "demo"
@@ -292,22 +359,29 @@ def test_cli_write_segment_outputs_metadata(tmp_path, capsys, monkeypatch):
         assert storage.extra == {"fs.use_iam": "true"}
         assert segment_path == "segments/10"
         assert segment_id == 10
+        assert collection_name is None
         assert partition_id == 1
         assert manifest_version == "v1"
         return {
-            "segment_id": 10,
-            "partition_id": 1,
-            "row_count": 2,
-            "storage_version": "StorageV3",
-            "manifest_path": "segments/10",
-            "manifest_version": "v1",
+            "collection_name": "demo",
+            "collection_schema": schema,
+            "segments": [
+                {
+                    "segment_id": 10,
+                    "partition_id": 1,
+                    "row_count": 2,
+                    "storage_version": "StorageV3",
+                    "manifest_path": "segments/10",
+                    "manifest_version": "v1",
+                }
+            ],
         }
 
-    monkeypatch.setattr("milvus_toolkit.write_segment", write_segment)
+    monkeypatch.setattr("ray_milvus.write_snapshot", write_snapshot)
 
     exit_code = main(
         [
-            "write-segment",
+            "write-native-segment",
             "--input",
             str(input_path),
             "--schema-file",
@@ -415,7 +489,7 @@ def test_cli_backfill_snapshot(tmp_path, capsys, monkeypatch):
         Path(output_path).write_text(json.dumps(payload), encoding="utf-8")
         return payload
 
-    monkeypatch.setattr("milvus_toolkit.backfill_snapshot", backfill_snapshot)
+    monkeypatch.setattr("ray_milvus.backfill_snapshot", backfill_snapshot)
 
     exit_code = main(
         [
@@ -484,7 +558,7 @@ def test_cli_storage_extra_requires_key_value(capsys):
 
 
 
-def test_cli_write_segment_outputs_snapshot(tmp_path, capsys, monkeypatch):
+def test_cli_write_native_segment_writes_snapshot_file(tmp_path, capsys, monkeypatch):
     input_path = tmp_path / "input.parquet"
     schema_path = tmp_path / "schema.json"
     snapshot_path = tmp_path / "snapshot.json"
@@ -497,7 +571,7 @@ def test_cli_write_segment_outputs_snapshot(tmp_path, capsys, monkeypatch):
     )
 
     def write_snapshot(*args, **kwargs):
-        payload = {
+        return {
             "collection_name": "demo_collection",
             "collection_schema": {
                 "name": "demo_collection",
@@ -514,14 +588,12 @@ def test_cli_write_segment_outputs_snapshot(tmp_path, capsys, monkeypatch):
                 }
             ],
         }
-        snapshot_path.write_text(json.dumps(payload), encoding="utf-8")
-        return payload
 
-    monkeypatch.setattr("milvus_toolkit.write_snapshot", write_snapshot)
+    monkeypatch.setattr("ray_milvus.write_snapshot", write_snapshot)
 
     exit_code = main(
         [
-            "write-segment",
+            "write-native-segment",
             "--input",
             str(input_path),
             "--schema-file",
@@ -539,6 +611,64 @@ def test_cli_write_segment_outputs_snapshot(tmp_path, capsys, monkeypatch):
 
     output = capsys.readouterr().out
     assert exit_code == 0
-    assert "Wrote segment 10 and snapshot" in output
+    assert "Wrote snapshot" in output
+    assert "collection demo_collection" in output
+    assert "1 segment(s)" in output
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot["collection_name"] == "demo_collection"
+
+
+
+def test_cli_write_native_segment_prints_snapshot_json(tmp_path, capsys, monkeypatch):
+    input_path = tmp_path / "input.parquet"
+    schema_path = tmp_path / "schema.json"
+    pq.write_table(pa.table({"id": [1, 2]}), input_path)
+    schema_path.write_text(
+        json.dumps(
+            {"name": "demo", "fields": [{"name": "id", "field_id": 100, "data_type": "Int64"}]}
+        ),
+        encoding="utf-8",
+    )
+
+    def write_snapshot(*args, **kwargs):
+        return {
+            "collection_name": "demo_collection",
+            "collection_schema": {
+                "name": "demo_collection",
+                "fields": [{"name": "id", "field_id": 100, "data_type": "Int64"}],
+            },
+            "segments": [
+                {
+                    "segment_id": 10,
+                    "partition_id": None,
+                    "row_count": 2,
+                    "storage_version": "StorageV3",
+                    "manifest_path": "segments/10",
+                    "manifest_version": None,
+                }
+            ],
+        }
+
+    monkeypatch.setattr("ray_milvus.write_snapshot", write_snapshot)
+
+    exit_code = main(
+        [
+            "write-native-segment",
+            "--input",
+            str(input_path),
+            "--schema-file",
+            str(schema_path),
+            "--segment-path",
+            "segments/10",
+            "--segment-id",
+            "10",
+            "--collection-name",
+            "demo_collection",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    snapshot = json.loads(output)
+    assert snapshot["collection_name"] == "demo_collection"
+    assert snapshot["segments"][0]["segment_id"] == 10

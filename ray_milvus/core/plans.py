@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from milvus_toolkit.types import FieldSchema, MilvusSchema, SegmentMetadata, StorageConfig
+from ray_milvus.types import FieldSchema, MilvusSchema, SegmentMetadata, StorageConfig
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,7 @@ import os
 
 import pytest
 
-import milvus_toolkit as mt
+import ray_milvus as mt
 
 
 def test_import_real_native_snapshot_artifact_smoke(tmp_path):
@@ -14,7 +14,7 @@ def test_import_real_native_snapshot_artifact_smoke(tmp_path):
         pytest.skip("MILVUS_NATIVE_SNAPSHOT_METADATA is required")
 
     output_path = tmp_path / "toolkit-snapshot.json"
-    payload = mt.import_milvus_snapshot(
+    payload = mt.import_native_milvus_snapshot(
         metadata_path=metadata_path,
         manifest_dir=os.environ.get("MILVUS_NATIVE_SNAPSHOT_MANIFEST_DIR"),
         output_path=output_path,

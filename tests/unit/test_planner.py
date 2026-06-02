@@ -2,10 +2,10 @@ from pathlib import Path
 
 import pytest
 
-from milvus_toolkit.core.planner import plan_snapshot_read
-from milvus_toolkit.errors import UnsupportedFeatureError
-from milvus_toolkit.io.object_store import load_snapshot_json
-from milvus_toolkit.types import StorageConfig
+from ray_milvus.core.planner import plan_snapshot_read
+from ray_milvus.errors import UnsupportedFeatureError
+from ray_milvus.io.object_store import load_snapshot_json
+from ray_milvus.types import StorageConfig
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 
@@ -33,7 +33,7 @@ def test_plan_snapshot_read_keeps_non_storage_v3_engine_neutral():
 
     assert len(plan.tasks) == 1
     assert plan.tasks[0].segment.segment_id == 20
-    assert plan.tasks[0].segment.storage_version == "PackedParquet"
+    assert plan.tasks[0].segment.storage_version == "StorageV1"
 
 
 def test_plan_snapshot_read_rejects_unknown_include():

@@ -3,8 +3,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from milvus_toolkit.errors import SnapshotError
-from milvus_toolkit.io.object_store import load_snapshot_json
+from ray_milvus.errors import SnapshotError
+from ray_milvus.io.object_store import load_snapshot_json
 
 
 def test_load_snapshot_json_from_s3(monkeypatch):
@@ -24,7 +24,7 @@ def test_load_snapshot_json_from_s3(monkeypatch):
             return FakeFile()
 
     monkeypatch.setattr(
-        "milvus_toolkit.io.object_store._filesystem_from_uri",
+        "ray_milvus.io.object_store._filesystem_from_uri",
         lambda pafs, uri, **kwargs: (FakeFileSystem(), "snapshots/demo.json"),
     )
 
@@ -36,7 +36,7 @@ def test_load_snapshot_json_from_s3(monkeypatch):
 
 
 def test_load_snapshot_json_from_storage_builds_s3_filesystem(monkeypatch):
-    from milvus_toolkit.io.object_store import load_snapshot_json_from_storage
+    from ray_milvus.io.object_store import load_snapshot_json_from_storage
 
     class FakeFile:
         def __enter__(self):
@@ -63,7 +63,7 @@ def test_load_snapshot_json_from_storage_builds_s3_filesystem(monkeypatch):
             return FakeFile()
 
     monkeypatch.setattr(
-        "milvus_toolkit.io.object_store._filesystem_from_uri",
+        "ray_milvus.io.object_store._filesystem_from_uri",
         lambda pafs, uri, **kwargs: (
             FakeS3FileSystem(
                 endpoint_override=kwargs["endpoint_override"],
@@ -101,7 +101,7 @@ def test_load_snapshot_json_from_s3_rejects_malformed_json(monkeypatch):
 
     fake_filesystem = SimpleNamespace(open_input_file=lambda path: FakeFile())
     monkeypatch.setattr(
-        "milvus_toolkit.io.object_store._filesystem_from_uri",
+        "ray_milvus.io.object_store._filesystem_from_uri",
         lambda pafs, uri, **kwargs: (fake_filesystem, "snapshot.json"),
     )
 

@@ -3,14 +3,14 @@ requires = ["hatchling", "conan>=2"]
 build-backend = "hatchling.build"
 
 [project]
-name = "milvus-toolkit"
+name = "ray-milvus"
 version = "0.1.0"
-description = "Milvus Python Toolkit for offline StorageV3 snapshot inspection and reads."
+description = "ray-milvus for Milvus StorageV3 snapshot reads, writes, and Ray execution."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [
-  { name = "Milvus Python Toolkit contributors" }
+  { name = "ray-milvus contributors" }
 ]
 dependencies = [
   "pyarrow>=17.0.0",
@@ -26,19 +26,22 @@ native-snapshot = [
 pymilvus = [
   "pymilvus>=2.4",
 ]
+ray = [
+  "ray>=2.9",
+]
 test = [
   "pytest>=7",
   "ruff>=0.4",
 ]
 
 [project.scripts]
-milvus-toolkit = "milvus_toolkit.cli.main:main"
+ray-milvus = "ray_milvus.cli.main:main"
 
 [tool.hatch.build.hooks.custom]
 path = "scripts/hatch_build.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["milvus_toolkit"]
+packages = ["ray_milvus"]
 artifacts = [
   "third_party/milvus-storage/python/milvus_storage/lib/*.so",
   "third_party/milvus-storage/python/milvus_storage/lib/*.dylib",
@@ -46,7 +49,7 @@ artifacts = [
 ]
 
 [tool.hatch.build.targets.wheel.force-include]
-"third_party/milvus-storage/python/milvus_storage" = "milvus_toolkit/_vendor/milvus_storage"
+"third_party/milvus-storage/python/milvus_storage" = "ray_milvus/_vendor/milvus_storage"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -54,7 +57,7 @@ testpaths = ["tests"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["third_party"]
+extend-exclude = ["third_party", "ray_milvus/_vendor/milvus_storage"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]

@@ -13,7 +13,7 @@ CONAN_REMOTE_URL = "https://milvus01.jfrog.io/artifactory/api/conan/default-cona
 ROOT = Path(__file__).resolve().parents[1]
 THIRD_PARTY = ROOT / "third_party"
 CHECKOUT = THIRD_PARTY / "milvus-storage"
-VENDOR_PACKAGE = ROOT / "milvus_toolkit" / "_vendor" / "milvus_storage"
+VENDOR_PACKAGE = ROOT / "ray_milvus" / "_vendor" / "milvus_storage"
 
 
 def main() -> int:
@@ -38,7 +38,7 @@ def main() -> int:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build and stage milvus-storage native library for milvus-toolkit"
+        description="Build and stage milvus-storage native library for ray-milvus"
     )
     return parser.parse_args()
 

@@ -4,8 +4,8 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from milvus_toolkit.errors import SnapshotError
-from milvus_toolkit.types import SegmentMetadata
+from ray_milvus.errors import SnapshotError
+from ray_milvus.types import SegmentMetadata
 
 from .schema import parse_schema
 
@@ -76,9 +76,7 @@ def _parse_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
                         segment = {**segment, "partition_id": partition_id}
                     raw_segments.append(segment)
         if not raw_segments:
-            manifest_segments = _parse_storage_v3_manifest_segments(data)
-            if manifest_segments:
-                return manifest_segments
+            _reject_storage_v2_manifest_segments(data)
             legacy_manifest_segments = _parse_legacy_manifest_segments(data)
             if legacy_manifest_segments:
                 return legacy_manifest_segments
@@ -115,13 +113,8 @@ def _parse_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
                 raw={
                     **segment_data,
                     **(
-                        {"legacy_binlog_manifest": True}
-                        if segment_data.get("legacy_binlog_manifest")
-                        else {}
-                    ),
-                    **(
-                        {"field_path_aliases": segment_data.get("field_path_aliases")}
-                        if segment_data.get("field_path_aliases")
+                        {"packed_parquet_manifest": True}
+                        if segment_data.get("packed_parquet_manifest")
                         else {}
                     ),
                 },
@@ -130,49 +123,10 @@ def _parse_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
     return segments
 
 
-def _parse_storage_v3_manifest_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
+def _reject_storage_v2_manifest_segments(data: dict[str, Any]) -> None:
     raw_items = data.get("storagev2_manifest_list", data.get("storagev2-manifest-list"))
-    if raw_items is None:
-        return []
-    if not isinstance(raw_items, list):
-        raise SnapshotError("Snapshot storagev2_manifest_list must be a list")
-
-    segments = []
-    for item in raw_items:
-        if not isinstance(item, dict):
-            raise SnapshotError("Snapshot storagev2_manifest_list entries must be objects")
-        segment_id = item.get("segmentID", item.get("segment_id"))
-        if segment_id is None:
-            raise SnapshotError("Snapshot storagev2_manifest_list entries must include segmentID")
-        manifest_content = _parse_manifest_content(item.get("manifest"), segment_id)
-        base_path = manifest_content.get("base_path", manifest_content.get("basePath"))
-        if base_path is None:
-            raise SnapshotError(
-                f"Snapshot manifest for segment {segment_id} must include base_path"
-            )
-        version = manifest_content.get("version", manifest_content.get("ver"))
-        segments.append(
-            SegmentMetadata(
-                segment_id=int(segment_id),
-                partition_id=_optional_int(
-                    item.get("partition_id")
-                    or item.get("partitionID")
-                    or _partition_id_from_base_path(str(base_path))
-                ),
-                row_count=_optional_int(
-                    item.get("row_count")
-                    or item.get("rowCount")
-                    or item.get("num_rows")
-                    or item.get("numRows")
-                    or item.get("num_of_rows")
-                ),
-                storage_version="StorageV3",
-                manifest_path=str(base_path),
-                manifest_version=None if version is None else str(version),
-                raw=item,
-            )
-        )
-    return segments
+    if raw_items is not None:
+        raise SnapshotError("Milvus StorageV2 snapshot manifests are not supported")
 
 
 def _parse_legacy_manifest_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
@@ -209,8 +163,7 @@ def _parse_legacy_manifest_segments(data: dict[str, Any]) -> list[SegmentMetadat
                 manifest_version=None,
                 raw={
                     "manifest_path": manifest_path,
-                    "legacy_binlog_manifest": True,
-                    "field_path_aliases": {"100": "0", "1": "1"},
+                    "packed_parquet_manifest": True,
                 },
             )
         )
@@ -331,13 +284,8 @@ def _canonical_segments_data(
             "manifest_path": segment.manifest_path,
             "manifest_version": segment.manifest_version,
             **(
-                {"legacy_binlog_manifest": True}
-                if segment.raw.get("legacy_binlog_manifest")
-                else {}
-            ),
-            **(
-                {"field_path_aliases": segment.raw.get("field_path_aliases")}
-                if segment.raw.get("field_path_aliases")
+                {"packed_parquet_manifest": True}
+                if segment.raw.get("packed_parquet_manifest")
                 else {}
             ),
         }

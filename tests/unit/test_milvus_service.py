@@ -3,9 +3,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from milvus_toolkit.errors import ConfigError, UnsupportedFeatureError
-from milvus_toolkit.io.milvus_client import (
+from ray_milvus.errors import ConfigError, UnsupportedFeatureError
+from ray_milvus.io.milvus_service import (
+    MilvusService,
     create_snapshot_for_read,
+    describe_snapshot_for_read,
     load_collection_schema,
     normalize_collection_schema,
 )
@@ -97,7 +99,7 @@ def test_load_collection_schema_reports_missing_pymilvus(monkeypatch):
 
 
 
-def test_create_snapshot_for_read_returns_s3_location(monkeypatch):
+def test_milvus_service_create_snapshot_for_read_returns_s3_location(monkeypatch):
     calls = []
 
     class FakeClient:
@@ -118,12 +120,13 @@ def test_create_snapshot_for_read_returns_s3_location(monkeypatch):
         SimpleNamespace(MilvusClient=lambda **kwargs: FakeClient(**kwargs)),
     )
 
-    location = create_snapshot_for_read(
+    location = MilvusService(
         "http://localhost:19530",
-        "demo_collection",
-        "snapshot-1",
         token="secret",
         db_name="default",
+    ).create_snapshot_for_read(
+        "demo_collection",
+        "snapshot-1",
         compaction_protection_seconds=60,
     )
 
@@ -136,6 +139,116 @@ def test_create_snapshot_for_read_returns_s3_location(monkeypatch):
     assert calls[1][1]["snapshot_name"] == "snapshot-1"
     assert calls[1][1]["collection_name"] == "demo_collection"
     assert calls[1][1]["compaction_protection_seconds"] == 60
+
+
+def test_milvus_service_describe_snapshot_for_read_returns_s3_location(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        def describe_snapshot(self, **kwargs):
+            calls.append(("describe", kwargs))
+            return {"s3Location": "s3://bucket/snapshots/demo.json"}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pymilvus",
+        SimpleNamespace(MilvusClient=lambda **kwargs: FakeClient(**kwargs)),
+    )
+
+    location = MilvusService(
+        "http://localhost:19530",
+        token="secret",
+        db_name="default",
+    ).describe_snapshot_for_read(
+        "demo_collection",
+        "snapshot-1",
+    )
+
+    assert location.name == "snapshot-1"
+    assert location.location == "s3://bucket/snapshots/demo.json"
+    assert calls == [
+        (
+            "init",
+            {"uri": "http://localhost:19530", "token": "secret", "db_name": "default"},
+        ),
+        (
+            "describe",
+            {
+                "snapshot_name": "snapshot-1",
+                "collection_name": "demo_collection",
+                "db_name": "default",
+            },
+        ),
+    ]
+
+
+
+def test_create_snapshot_for_read_wrapper_uses_service(monkeypatch):
+    class FakeService:
+        def __init__(self, **kwargs):
+            assert kwargs == {
+                "uri": "http://localhost:19530",
+                "token": "secret",
+                "user": None,
+                "password": None,
+                "db_name": None,
+            }
+
+        def create_snapshot_for_read(self, **kwargs):
+            assert kwargs == {
+                "collection_name": "demo_collection",
+                "snapshot_name": "snapshot-1",
+                "description": None,
+                "compaction_protection_seconds": None,
+            }
+            return "location"
+
+    monkeypatch.setattr("ray_milvus.io.milvus_service.MilvusService", FakeService)
+
+    assert (
+        create_snapshot_for_read(
+            "http://localhost:19530",
+            "demo_collection",
+            "snapshot-1",
+            token="secret",
+        )
+        == "location"
+    )
+
+
+
+def test_describe_snapshot_for_read_wrapper_uses_service(monkeypatch):
+    class FakeService:
+        def __init__(self, **kwargs):
+            assert kwargs == {
+                "uri": "http://localhost:19530",
+                "token": "secret",
+                "user": None,
+                "password": None,
+                "db_name": None,
+            }
+
+        def describe_snapshot_for_read(self, **kwargs):
+            assert kwargs == {
+                "collection_name": "demo_collection",
+                "snapshot_name": "snapshot-1",
+            }
+            return "location"
+
+    monkeypatch.setattr("ray_milvus.io.milvus_service.MilvusService", FakeService)
+
+    assert (
+        describe_snapshot_for_read(
+            "http://localhost:19530",
+            "demo_collection",
+            "snapshot-1",
+            token="secret",
+        )
+        == "location"
+    )
 
 
 

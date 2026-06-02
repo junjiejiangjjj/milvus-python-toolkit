@@ -4,9 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository status
 
-This repository contains an initialized Python package skeleton for the Milvus Python Toolkit / Offline SDK MVP. The package currently provides public API, core planning/inspection models, a local execution skeleton, CLI wiring, fixtures, tests, and a `milvus-storage` backed `MilvusStorageReader`. Milvus Lite storage reads are not wired yet.
+This repository contains the `ray-milvus` Python package, the Python counterpart to `spark-milvus`. The package currently provides public API, core planning/inspection models, a local execution skeleton, CLI wiring, fixtures, tests, and a `milvus-storage` backed `MilvusStorageReader`. Milvus Lite storage reads are not wired yet.
 
-The current design direction is a Milvus Python Toolkit / Offline SDK rather than a Ray-specific connector. Use `docs/python-offline-toolkit-design-cn.md` as the primary architecture reference; `docs/python-connector-design-cn.md` is an earlier, more connector-focused design that was folded into the broader toolkit direction. Use `docs/mvp-plan-cn.md` for the immediate MVP scope.
+The current project identity is `ray-milvus`, with Python package `ray_milvus` and CLI command `ray-milvus`. Do not add or retain `milvus_toolkit` / `milvus-toolkit` compatibility paths. Use `docs/mvp-plan-cn.md` for the immediate MVP scope; the older design docs may contain historical generic-toolkit naming that should be interpreted through the current `ray-milvus` direction.
 
 ## Commands
 
@@ -28,11 +28,11 @@ python -m pytest
 python -m ruff check .
 
 # Check CLI help
-milvus-toolkit --help
-milvus-toolkit inspect --help
+ray-milvus --help
+ray-milvus inspect --help
 
 # Inspect the local StorageV3 fixture
-milvus-toolkit inspect --snapshot tests/fixtures/snapshot_storage_v3.json --s3-endpoint localhost:9000 --s3-bucket bucket --json
+ray-milvus inspect --snapshot tests/fixtures/snapshot_storage_v3.json --s3-endpoint localhost:9000 --s3-bucket bucket --json
 
 # Inspect repository status
 git status --short
@@ -48,7 +48,7 @@ The intended package is a Milvus-focused Python toolkit for offline data access 
 Recommended package shape from the current design:
 
 ```text
-milvus_toolkit/
+ray_milvus/
   api.py
   types.py
   errors.py
@@ -100,7 +100,7 @@ ops     -/-> engine-specific SDK unless isolated behind an optional engine path
 cli     -/-> storage internals
 ```
 
-`core/` should not depend on Ray, Daft, Pandas, Polars, DuckDB, or Spark. StorageV3 access, `milvus-storage` API details, and Milvus Lite local storage details should be isolated behind the `io` storage adapter layer. Upper layers should depend on a unified StorageReader/StorageWriter protocol rather than branching on Milvus vs Milvus Lite. `milvus-storage` must be consumed from the `third_party/milvus-storage` Git submodule and bundled into the `milvus-toolkit` wheel under `milvus_toolkit._vendor`; do not change it back to a plain PyPI dependency, direct Git dependency, top-level package, or separately installed `milvus_storage` wheel.
+`core/` should not depend on Ray, Daft, Pandas, Polars, DuckDB, or Spark. StorageV3 access, `milvus-storage` API details, and Milvus Lite local storage details should be isolated behind the `io` storage adapter layer. Upper layers should depend on a unified StorageReader/StorageWriter protocol rather than branching on Milvus vs Milvus Lite. `milvus-storage` must be consumed from the `third_party/milvus-storage` Git submodule and bundled into the `ray-milvus` wheel under `ray_milvus._vendor`; do not change it back to a plain PyPI dependency, direct Git dependency, top-level package, or separately installed `milvus_storage` wheel.
 
 ## Important domain constraints
 
@@ -131,5 +131,6 @@ Start with a compact first milestone rather than implementing every adapter at o
 
 ## Documentation references
 
-- `docs/python-offline-toolkit-design-cn.md`: current broader toolkit/offline SDK design and recommended architecture.
-- `docs/python-connector-design-cn.md`: earlier connector-core design with detailed notes on StorageV3, engine adapters, backfill, inspection, and test strategy.
+- `docs/mvp-plan-cn.md`: immediate `ray-milvus` MVP scope.
+- `docs/python-offline-toolkit-design-cn.md`: broader offline SDK design; older generic naming should be read as historical context.
+- `docs/python-connector-design-cn.md`: earlier connector-core design with detailed notes on StorageV3, engine adapters, backfill, inspection, and test strategy; naming guidance there is superseded by `ray-milvus`.

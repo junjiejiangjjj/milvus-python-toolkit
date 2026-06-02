@@ -7,10 +7,10 @@ from typing import Protocol
 
 import pyarrow as pa
 
-from milvus_toolkit.core.manifest import validate_storage_v3_manifest
-from milvus_toolkit.core.plans import SegmentReadTask
-from milvus_toolkit.errors import StorageError, UnsupportedFeatureError
-from milvus_toolkit.types import FieldSchema, StorageConfig
+from ray_milvus.core.manifest import validate_storage_v3_manifest
+from ray_milvus.core.plans import SegmentReadTask
+from ray_milvus.errors import StorageError, UnsupportedFeatureError
+from ray_milvus.types import FieldSchema, StorageConfig
 
 
 @dataclass(frozen=True)
@@ -61,33 +61,51 @@ class MilvusStorageReader:
         self.storage = storage
 
     def read_segment_table(self, task: SegmentReadTask) -> pa.Table:
+        batches = list(self.read_segment_batches(task))
+        return pa.Table.from_batches(batches) if batches else pa.table({})
+
+    def read_segment_batches(
+        self,
+        task: SegmentReadTask,
+        batch_size: int | None = None,
+    ) -> Iterable[pa.RecordBatch]:
         validate_storage_v3_manifest(task.segment)
-        milvus_storage = _load_milvus_storage()
         properties = _storage_properties(task.storage)
-        schema = _to_pyarrow_schema(task.projected_fields)
-        columns = [field.name for field in task.projected_fields]
-        transaction_path = _transaction_path(task.manifest_path)
 
         try:
-            if task.segment.raw.get("legacy_binlog_manifest"):
-                return _read_legacy_binlog_segment(task, properties)
-            else:
-                with milvus_storage.Transaction(
-                    transaction_path,
-                    properties=properties,
-                ) as transaction:
-                    manifest = _get_manifest(
-                        transaction,
-                        task.manifest_version,
-                    )
-                column_groups = milvus_storage.ColumnGroups.from_list(manifest.column_groups)
+            if task.segment.raw.get("packed_parquet_manifest"):
+                yield from _read_packed_parquet_segment_batches(
+                    task,
+                    properties,
+                    batch_size=batch_size,
+                )
+                return
+
+            milvus_storage = _load_milvus_storage()
+            schema = _to_pyarrow_schema(task.projected_fields)
+            columns = [field.name for field in task.projected_fields]
+            transaction_path = _transaction_path(task.manifest_path)
+            with milvus_storage.Transaction(
+                transaction_path,
+                properties=properties,
+            ) as transaction:
+                manifest = _get_manifest(
+                    transaction,
+                    task.manifest_version,
+                )
+            column_groups = milvus_storage.ColumnGroups.from_list(manifest.column_groups)
             with milvus_storage.Reader(
                 column_groups,
                 schema,
                 columns=columns,
                 properties=properties,
             ) as reader:
-                table = _scan_result_to_table(reader.scan(), schema=schema)
+                yield from _scan_result_to_batches(
+                    reader.scan(),
+                    schema=schema,
+                    columns=columns,
+                    batch_size=batch_size,
+                )
         except StorageError:
             raise
         except Exception as exc:
@@ -95,8 +113,6 @@ class MilvusStorageReader:
                 "Failed to read StorageV3 segment "
                 f"{task.segment.segment_id} from {task.manifest_path}: {exc}"
             ) from exc
-
-        return table.select(columns) if columns else table
 
 
 class MilvusStorageWriter:
@@ -177,58 +193,156 @@ class MilvusLiteStorageWriter:
 MilvusStorageAdapter = MilvusStorageReader
 
 
-def _read_legacy_binlog_segment(task: SegmentReadTask, properties: dict[str, str]) -> pa.Table:
-    if task.segment.manifest_path is None:
-        raise StorageError("Legacy binlog snapshot segment must include manifest_path")
-    arrays = {}
-    row_count = 0
-    for field in task.projected_fields:
-        field_path = task.segment.raw.get("field_path_aliases", {}).get(
-            str(field.field_id),
-            str(field.field_id),
-        )
-        table = _read_legacy_binlog_field(
-            task.segment.manifest_path,
-            field_path,
-            field,
-            properties,
-        )
-        row_count = max(row_count, table.num_rows)
-        arrays[field.name] = table[field.name]
-    if not arrays:
-        return pa.table({})
-    return pa.table(arrays)
-
-
-
-def _read_legacy_binlog_field(
-    manifest_path: str,
-    field_path: str,
-    field: FieldSchema,
+def _read_packed_parquet_segment_batches(
+    task: SegmentReadTask,
     properties: dict[str, str],
-) -> pa.Table:
-    import pyarrow.parquet as pq
-
-    filesystem, path_prefix = _legacy_binlog_filesystem(properties)
+    batch_size: int | None = None,
+) -> Iterable[pa.RecordBatch]:
+    if task.segment.manifest_path is None:
+        raise StorageError("Packed parquet snapshot segment must include manifest_path")
+    filesystem, path_prefix = _packed_parquet_filesystem(properties)
     selector = pa.fs.FileSelector(
-        f"{path_prefix}/{manifest_path}/{field_path}",
-        recursive=False,
+        _packed_parquet_segment_path(path_prefix, task.segment.manifest_path),
+        recursive=True,
     )
-    file_infos = [info for info in filesystem.get_file_info(selector) if info.is_file]
+    file_infos = sorted(
+        (info for info in filesystem.get_file_info(selector) if info.is_file),
+        key=lambda info: info.path,
+    )
     if not file_infos:
         raise StorageError(
-            f"Legacy binlog field {field.name} has no files at {manifest_path}/{field_path}"
+            f"Packed parquet segment {task.segment.segment_id} has no files at "
+            f"{task.segment.manifest_path}"
         )
-    tables = []
-    for file_info in sorted(file_infos, key=lambda info: info.path):
+
+    if not task.projected_fields:
+        return
+
+    file_index = _packed_parquet_file_index(file_infos, filesystem)
+    field_iterators = []
+    for field in task.projected_fields:
+        field_files = _packed_parquet_files_for_field(file_index, field)
+        if not field_files:
+            raise StorageError(
+                f"Packed parquet segment {task.segment.segment_id} has no files for "
+                f"field {field.name} ({field.field_id})"
+            )
+        field_iterators.append(
+            (
+                field,
+                iter(
+                    _read_packed_parquet_field_batches(
+                        field_files,
+                        filesystem,
+                        field,
+                        batch_size=batch_size,
+                    )
+                ),
+            )
+        )
+
+    while True:
+        batches = []
+        for index, (field, iterator) in enumerate(field_iterators):
+            try:
+                batch = next(iterator)
+            except StopIteration:
+                if index == 0:
+                    _ensure_packed_parquet_iterators_exhausted(field_iterators[1:])
+                    return
+                raise StorageError(
+                    f"Packed parquet field {field.name} ended before other fields"
+                ) from None
+            batches.append(batch)
+        yield _merge_packed_parquet_field_batches(batches)
+
+
+
+def _ensure_packed_parquet_iterators_exhausted(field_iterators) -> None:
+    for field, iterator in field_iterators:
+        try:
+            next(iterator)
+        except StopIteration:
+            continue
+        raise StorageError(f"Packed parquet field {field.name} has extra rows")
+
+
+
+def _merge_packed_parquet_field_batches(batches: list[pa.RecordBatch]) -> pa.RecordBatch:
+    row_count = batches[0].num_rows
+    arrays = []
+    fields = []
+    for batch in batches:
+        if batch.num_rows != row_count:
+            raise StorageError("Packed parquet field batch row counts do not match")
+        arrays.extend(batch.columns)
+        fields.extend(batch.schema)
+    return pa.RecordBatch.from_arrays(arrays, schema=pa.schema(fields))
+
+
+
+def _packed_parquet_segment_path(path_prefix: str, manifest_path: str) -> str:
+    if not path_prefix:
+        return manifest_path
+    return f"{path_prefix.rstrip('/')}/{manifest_path.lstrip('/')}"
+
+
+
+def _packed_parquet_file_index(file_infos, filesystem):
+    import pyarrow.parquet as pq
+
+    field_id_files = {}
+    field_name_files = {}
+    for file_info in file_infos:
         with filesystem.open_input_file(file_info.path) as file_obj:
-            table = pq.read_table(file_obj)
-        tables.append(_coerce_legacy_binlog_field_table(table, field))
-    return pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+            schema = pq.ParquetFile(file_obj).schema_arrow
+        for arrow_field in schema:
+            field_name_files.setdefault(arrow_field.name, []).append(file_info)
+            field_id = _parquet_field_id(arrow_field)
+            if field_id is not None:
+                field_id_files.setdefault(field_id, []).append(file_info)
+    return field_id_files, field_name_files
 
 
 
-def _legacy_binlog_filesystem(properties: dict[str, str]):
+def _packed_parquet_files_for_field(file_index, field: FieldSchema):
+    field_id_files, field_name_files = file_index
+    return field_id_files.get(str(field.field_id), field_name_files.get(field.name, []))
+
+
+
+def _read_packed_parquet_field_batches(
+    file_infos,
+    filesystem,
+    field: FieldSchema,
+    batch_size: int | None = None,
+) -> Iterable[pa.RecordBatch]:
+    import pyarrow.parquet as pq
+
+    for file_info in file_infos:
+        with filesystem.open_input_file(file_info.path) as file_obj:
+            parquet_file = pq.ParquetFile(file_obj)
+            source_name = _packed_parquet_source_column(parquet_file.schema_arrow, field)
+            if source_name is None:
+                raise StorageError(
+                    f"Packed parquet file missing field {field.name} ({field.field_id})"
+                )
+            iter_batches_kwargs = {"columns": [source_name]}
+            if batch_size is not None:
+                iter_batches_kwargs["batch_size"] = batch_size
+            for batch in parquet_file.iter_batches(**iter_batches_kwargs):
+                yield _coerce_packed_parquet_field_batch(batch, field)
+
+
+
+def _parquet_field_id(field: pa.Field) -> str | None:
+    metadata = field.metadata or {}
+    field_id = metadata.get(b"PARQUET:field_id")
+    return None if field_id is None else field_id.decode("utf-8")
+
+
+
+def _packed_parquet_filesystem(properties: dict[str, str]):
     storage_type = properties.get("fs.storage_type")
     if storage_type == "local":
         return pa.fs.LocalFileSystem(), properties.get("fs.root_path", "")
@@ -245,21 +359,35 @@ def _legacy_binlog_filesystem(properties: dict[str, str]):
             options["region"] = properties["fs.region"]
         bucket = properties.get("fs.bucket_name")
         if bucket is None:
-            raise StorageError("Remote legacy binlog storage requires fs.bucket_name")
+            raise StorageError("Remote packed parquet storage requires fs.bucket_name")
         return pa.fs.S3FileSystem(**options), bucket
-    raise StorageError(f"Unsupported legacy binlog storage type: {storage_type}")
+    raise StorageError(f"Unsupported packed parquet storage type: {storage_type}")
 
 
 
-def _coerce_legacy_binlog_field_table(table: pa.Table, field: FieldSchema) -> pa.Table:
-    if field.name not in table.column_names:
-        raise StorageError(f"Legacy binlog file missing column {field.name}")
-    column = table[field.name]
+def _coerce_packed_parquet_field_batch(
+    batch: pa.RecordBatch,
+    field: FieldSchema,
+) -> pa.RecordBatch:
+    source_name = _packed_parquet_source_column(batch.schema, field)
+    if source_name is None:
+        raise StorageError(
+            f"Packed parquet file missing field {field.name} ({field.field_id})"
+        )
+    column = batch.column(source_name)
     if field.data_type.replace("_", "").lower() == "floatvector":
         column = _fixed_size_binary_to_float_vector(column, field)
     else:
         column = column.cast(_to_pyarrow_type(field))
-    return pa.table({field.name: column})
+    return pa.RecordBatch.from_arrays([column], names=[field.name])
+
+
+
+def _packed_parquet_source_column(schema: pa.Schema, field: FieldSchema) -> str | None:
+    for arrow_field in schema:
+        if _parquet_field_id(arrow_field) == str(field.field_id):
+            return arrow_field.name
+    return field.name if field.name in schema.names else None
 
 
 
@@ -277,41 +405,14 @@ def _fixed_size_binary_to_float_vector(column: pa.ChunkedArray, field: FieldSche
 
 
 
-def _legacy_binlog_column_groups(
-    milvus_storage,
-    manifest_path: str | None,
-    fields,
-    field_path_aliases: dict[str, str],
-):
-    if manifest_path is None:
-        raise StorageError("Legacy binlog snapshot segment must include manifest_path")
-    column_groups = []
-    for field in fields:
-        field_path = field_path_aliases.get(str(field.field_id), str(field.field_id))
-        column_groups.append(
-            milvus_storage.ColumnGroup(
-                columns=[field.name],
-                format="parquet",
-                files=[
-                    milvus_storage.ColumnGroupFile(
-                        f"{manifest_path}/{field_path}/",
-                        0,
-                        2**63 - 1,
-                    )
-                ],
-            )
-        )
-    return milvus_storage.ColumnGroups.from_list(column_groups)
-
-
 
 def _load_milvus_storage():
     try:
-        from milvus_toolkit._vendor import milvus_storage
+        from ray_milvus._vendor import milvus_storage
     except ImportError as exc:
         raise StorageError(
             "Bundled milvus_storage is unavailable; run scripts/install_dev.sh "
-            "or install a milvus-toolkit wheel built with python -m build --wheel"
+            "or install a ray-milvus wheel built with python -m build --wheel"
         ) from exc
     return milvus_storage
 
@@ -454,10 +555,47 @@ def _scan_result_to_table(scan_result, schema: pa.Schema | None = None) -> pa.Ta
             f"got {type(table).__name__}"
         )
 
+    batches = list(_scan_result_to_batches(scan_result, schema=schema))
+    return pa.Table.from_batches(batches, schema=schema) if batches else pa.table({})
+
+
+
+def _scan_result_to_batches(
+    scan_result,
+    schema: pa.Schema | None = None,
+    columns: list[str] | None = None,
+    batch_size: int | None = None,
+) -> Iterable[pa.RecordBatch]:
+    if isinstance(scan_result, pa.Table):
+        table = scan_result.select(columns) if columns else scan_result
+        yield from table.to_batches(max_chunksize=batch_size)
+        return
+
+    if hasattr(scan_result, "read_all"):
+        table = scan_result.read_all()
+        if isinstance(table, pa.Table):
+            table = table.select(columns) if columns else table
+            yield from table.to_batches(max_chunksize=batch_size)
+            return
+        raise StorageError(
+            "milvus-storage Reader.scan().read_all() must return a pyarrow.Table, "
+            f"got {type(table).__name__}"
+        )
+
     if isinstance(scan_result, Iterable):
-        batches = list(scan_result)
-        if all(isinstance(batch, pa.RecordBatch) for batch in batches):
-            return pa.Table.from_batches(batches, schema=schema)
+        for batch in scan_result:
+            if not isinstance(batch, pa.RecordBatch):
+                raise StorageError(
+                    "milvus-storage Reader.scan() iterable must yield pyarrow.RecordBatch, "
+                    f"got {type(batch).__name__}"
+                )
+            table = pa.Table.from_batches([batch])
+            if columns:
+                table = table.select(columns)
+            if schema is not None:
+                table = _coerce_table_schema(table, schema)
+            yield from table.to_batches(max_chunksize=batch_size)
+        return
 
     raise StorageError(
         "milvus-storage Reader.scan() must return a pyarrow.Table, an object with "

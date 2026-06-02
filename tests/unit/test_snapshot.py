@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from milvus_toolkit.core.snapshot import build_snapshot_payload, parse_snapshot
-from milvus_toolkit.errors import SnapshotError
-from milvus_toolkit.io.object_store import load_snapshot_json
+from ray_milvus.core.snapshot import build_snapshot_payload, parse_snapshot
+from ray_milvus.errors import SnapshotError
+from ray_milvus.io.object_store import load_snapshot_json
 
 FIXTURE = Path(__file__).parents[1] / "fixtures" / "snapshot_storage_v3.json"
 
@@ -84,36 +84,29 @@ def test_build_snapshot_payload_rejects_invalid_segments():
 
 
 
-def test_parse_snapshot_storage_v3_manifest_list():
-    snapshot = parse_snapshot(
-        {
-            "snapshot_info": {"collection_id": 100},
-            "collection": {
-                "name": "demo",
-                "schema": {
+def test_parse_snapshot_storage_v2_manifest_list_is_not_supported():
+    with pytest.raises(SnapshotError, match="StorageV2 snapshot manifests are not supported"):
+        parse_snapshot(
+            {
+                "snapshot_info": {"collection_id": 100},
+                "collection": {
                     "name": "demo",
-                    "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+                    "schema": {
+                        "name": "demo",
+                        "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+                    },
                 },
-            },
-            "storagev2_manifest_list": [
-                {
-                    "segmentID": "300",
-                    "rowCount": "5",
-                    "manifest": json.dumps(
-                        {"ver": 7, "base_path": "files/insert_log/100/200/300"}
-                    ),
-                }
-            ],
-        }
-    )
-
-    assert snapshot.collection_name == "demo"
-    assert snapshot.segments[0].segment_id == 300
-    assert snapshot.segments[0].partition_id == 200
-    assert snapshot.segments[0].row_count == 5
-    assert snapshot.segments[0].storage_version == "StorageV3"
-    assert snapshot.segments[0].manifest_path == "files/insert_log/100/200/300"
-    assert snapshot.segments[0].manifest_version == "7"
+                "storagev2_manifest_list": [
+                    {
+                        "segmentID": "300",
+                        "rowCount": "5",
+                        "manifest": json.dumps(
+                            {"ver": 7, "base_path": "files/insert_log/100/200/300"}
+                        ),
+                    }
+                ],
+            }
+        )
 
 
 
@@ -138,8 +131,8 @@ def test_parse_snapshot_legacy_manifest_list_derives_transaction_path():
 
 
 
-def test_parse_snapshot_storage_v3_manifest_rejects_invalid_json():
-    with pytest.raises(SnapshotError, match="not valid JSON"):
+def test_parse_snapshot_storage_v2_manifest_rejects_before_parsing_manifest():
+    with pytest.raises(SnapshotError, match="StorageV2 snapshot manifests are not supported"):
         parse_snapshot(
             {
                 "collection_schema": {

@@ -11,8 +11,8 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class CustomBuildHook(BuildHookInterface):
     def initialize(self, version: str, build_data: dict) -> None:
-        del version, build_data
-        if self.target_name != "wheel":
+        del build_data
+        if self.target_name != "wheel" or version == "editable":
             return
         subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "build_milvus_storage.py")],

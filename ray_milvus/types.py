@@ -19,6 +19,15 @@ class StorageConfig:
 
 
 @dataclass(frozen=True)
+class MilvusConfig:
+    uri: str
+    token: str | None = None
+    user: str | None = None
+    password: str | None = None
+    db_name: str | None = None
+
+
+@dataclass(frozen=True)
 class ReadOptions:
     columns: tuple[str, ...] | None = None
     include: tuple[str, ...] = ()

@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from milvus_toolkit.errors import SnapshotError, UnsupportedFeatureError
+from ray_milvus.errors import SnapshotError, UnsupportedFeatureError
 
 
 def load_snapshot_json(snapshot_path: str) -> dict[str, Any]:

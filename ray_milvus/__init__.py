@@ -1,16 +1,16 @@
-from milvus_toolkit.api import (
+from ray_milvus.api import (
+    RayMilvus,
     backfill_snapshot,
     create_snapshot,
     create_snapshot_from_milvus,
-    create_snapshot_from_milvus_snapshot,
     import_milvus_snapshot,
+    import_native_milvus_snapshot,
     inspect_snapshot,
     read_snapshot,
-    write_segment,
     write_snapshot,
     write_snapshot_segments,
 )
-from milvus_toolkit.errors import (
+from ray_milvus.errors import (
     ConfigError,
     EngineError,
     ManifestError,
@@ -22,14 +22,16 @@ from milvus_toolkit.errors import (
     UnsupportedSegmentError,
     UnsupportedStorageError,
 )
-from milvus_toolkit.types import InspectionResult, ReadOptions, StorageConfig
+from ray_milvus.types import InspectionResult, MilvusConfig, ReadOptions, StorageConfig
 
 __all__ = [
     "ConfigError",
     "EngineError",
     "InspectionResult",
     "ManifestError",
+    "MilvusConfig",
     "MilvusToolkitError",
+    "RayMilvus",
     "ReadOptions",
     "SchemaError",
     "SnapshotError",
@@ -41,11 +43,10 @@ __all__ = [
     "backfill_snapshot",
     "create_snapshot",
     "create_snapshot_from_milvus",
-    "create_snapshot_from_milvus_snapshot",
     "import_milvus_snapshot",
+    "import_native_milvus_snapshot",
     "inspect_snapshot",
     "read_snapshot",
-    "write_segment",
     "write_snapshot",
     "write_snapshot_segments",
 ]

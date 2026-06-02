@@ -1,4 +1,4 @@
-# Milvus Python Connector 多执行引擎设计方案
+# ray-milvus 多执行引擎设计方案
 
 本文档记录一个比“Ray 版本”更抽象的设计：构建一个 **Milvus Python Connector Core**，再在其上适配 Ray、Daft 以及后续其他 Python 数据处理项目。
 
@@ -18,7 +18,7 @@
 - 提供 segment inspection 工具。
 - 提供向量距离和 KNN 类辅助能力。
 
-最初可以把这些能力迁移到 Ray，但如果直接做 `ray-milvus`，后续集成 Daft 或其他 Python 项目时会重复实现大量 Milvus 逻辑。因此新的目标是：
+最初可以把这些能力迁移到 Ray。项目当前已确定命名为 `ray-milvus`，但仍应避免把 Milvus 语义写死在 Ray adapter 中。因此目标是：
 
 ```text
 Milvus / Snapshot / Object Storage
@@ -37,19 +37,15 @@ Ray / Daft / Pandas / Polars / DuckDB / 普通 Python job
 1. **Milvus Connector Core**：引擎无关层，只处理 Milvus 相关的语义、元数据、StorageV3 存储读写和计划生成。
 2. **Execution Engine Adapter**：执行引擎适配层，把 Core 产出的 task/Arrow batch 映射到 Ray、Daft、Pandas、Polars、DuckDB 等不同框架。
 
-建议项目命名不要直接叫 `ray-milvus`，而应使用更通用的名字，例如：
-
-- `milvus-python-connector`
-- `milvus-dataset-connector`
-- `milvus-data-connector`
+项目当前命名为 `ray-milvus`，与 `spark-milvus` 对应；包内仍保持 engine-neutral core，并通过 extra 选择执行引擎依赖。
 
 安装时通过 extra 选择引擎依赖：
 
 ```bash
-pip install milvus-connector[ray]
-pip install milvus-connector[daft]
-pip install milvus-connector[polars]
-pip install milvus-connector[duckdb]
+pip install ray-milvus[ray]
+pip install ray-milvus[daft]
+pip install ray-milvus[polars]
+pip install ray-milvus[duckdb]
 ```
 
 ## 3. 建议项目架构
@@ -308,18 +304,18 @@ CLI 只是高层 API 的命令行包装，不应绕过 `api.py` 或 Core。
 ```text
 cli/
   main.py           # argparse/typer/click entrypoint
-  inspect.py        # milvus-connector inspect
-  read.py           # milvus-connector read
-  backfill.py       # milvus-connector backfill
-  insert.py         # milvus-connector insert
-  write_segment.py  # milvus-connector write-segment
+  inspect.py        # ray-milvus inspect
+  read.py           # ray-milvus read
+  backfill.py       # ray-milvus backfill
+  insert.py         # ray-milvus insert
+  write_segment.py  # ray-milvus write-segment
 ```
 
 CLI 职责：
 
 - 参数解析。
 - storage / Milvus 连接参数归一化。
-- 调用 `milvus_connector.api`。
+- 调用 `ray_milvus.api`。
 - 统一错误展示和 exit code。
 - 支持 JSON 输出，便于脚本和 CI 使用。
 
@@ -889,7 +885,7 @@ info = inspect_snapshot(snapshot_path, storage=storage)
 CLI：
 
 ```bash
-milvus-connector inspect \
+ray-milvus inspect \
   --snapshot s3://bucket/files/snapshots/.../metadata.json \
   --s3-endpoint localhost:9000 \
   --s3-bucket bucket
@@ -927,26 +923,26 @@ Vector functions 也应分 Core 和 Engine adapter：
 
 ## 17. CLI 设计
 
-统一 CLI 名称建议为：
+统一 CLI 名称为：
 
 ```bash
-milvus-connector
+ray-milvus
 ```
 
 子命令：
 
 ```bash
-milvus-connector inspect ...
-milvus-connector read ...
-milvus-connector backfill ...
-milvus-connector insert ...
-milvus-connector write-segment ...
+ray-milvus inspect ...
+ray-milvus read ...
+ray-milvus backfill ...
+ray-milvus insert ...
+ray-milvus write-segment ...
 ```
 
 示例：
 
 ```bash
-milvus-connector backfill \
+ray-milvus backfill \
   --engine ray \
   --snapshot s3://milvus-bucket/snapshots/foo.json \
   --backfill-data s3://source-bucket/new_fields.parquet \

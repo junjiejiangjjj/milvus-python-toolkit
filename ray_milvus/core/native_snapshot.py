@@ -5,8 +5,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from milvus_toolkit.core.snapshot import build_snapshot_payload
-from milvus_toolkit.errors import ConfigError, SnapshotError
+from ray_milvus.core.snapshot import build_snapshot_payload
+from ray_milvus.errors import ConfigError, SnapshotError
 
 _SEGMENT_MANIFEST_AVRO_SCHEMA = {
     "type": "record",
@@ -279,7 +279,7 @@ def _read_manifest_record(path: Path | None) -> dict[str, Any]:
     except ImportError as exc:
         raise ConfigError(
             "fastavro is required to import Milvus native snapshot manifests. "
-            "Install it with `pip install milvus-toolkit[native-snapshot]`."
+            "Install it with `pip install ray-milvus[native-snapshot]`."
         ) from exc
 
     with path.open("rb") as manifest_file:

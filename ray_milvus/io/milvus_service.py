@@ -4,14 +4,120 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from milvus_toolkit.core.schema import parse_schema
-from milvus_toolkit.errors import ConfigError, SchemaError, UnsupportedFeatureError
+from ray_milvus.core.schema import parse_schema
+from ray_milvus.errors import ConfigError, SchemaError, UnsupportedFeatureError
 
 
 @dataclass(frozen=True)
 class MilvusSnapshotLocation:
     name: str
     location: str
+
+
+class MilvusService:
+    def __init__(
+        self,
+        uri: str,
+        token: str | None = None,
+        user: str | None = None,
+        password: str | None = None,
+        db_name: str | None = None,
+    ):
+        self.uri = uri
+        self.token = token
+        self.user = user
+        self.password = password
+        self.db_name = db_name
+        self._client = None
+
+    def load_collection_schema(self, collection_name: str) -> dict[str, Any]:
+        try:
+            schema = self.client.describe_collection(collection_name=collection_name)
+        except Exception as exc:  # noqa: BLE001
+            raise ConfigError(f"Failed to load Milvus collection schema: {exc}") from exc
+        return normalize_collection_schema(schema, collection_name=collection_name)
+
+    def create_snapshot_for_read(
+        self,
+        collection_name: str,
+        snapshot_name: str,
+        description: str | None = None,
+        compaction_protection_seconds: int | None = None,
+    ) -> MilvusSnapshotLocation:
+        create_method = _required_method(self.client, ("create_snapshot", "createSnapshot"))
+        create_kwargs = {
+            "snapshot_name": snapshot_name,
+            "collection_name": collection_name,
+        }
+        if self.db_name is not None:
+            create_kwargs["db_name"] = self.db_name
+        if description is not None:
+            create_kwargs["description"] = description
+        if compaction_protection_seconds is not None:
+            create_kwargs["compaction_protection_seconds"] = compaction_protection_seconds
+        try:
+            _call_with_fallback(create_method, create_kwargs)
+        except UnsupportedFeatureError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ConfigError(f"Failed to create Milvus snapshot for read: {exc}") from exc
+        return self.describe_snapshot_for_read(
+            collection_name=collection_name,
+            snapshot_name=snapshot_name,
+        )
+
+    def describe_snapshot_for_read(
+        self,
+        collection_name: str,
+        snapshot_name: str,
+    ) -> MilvusSnapshotLocation:
+        describe_method = _required_method(self.client, ("describe_snapshot", "describeSnapshot"))
+        try:
+            response = _call_with_fallback(
+                describe_method,
+                {
+                    "snapshot_name": snapshot_name,
+                    "collection_name": collection_name,
+                    **({"db_name": self.db_name} if self.db_name is not None else {}),
+                },
+            )
+        except UnsupportedFeatureError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise ConfigError(f"Failed to describe Milvus snapshot for read: {exc}") from exc
+        location = _first_value(
+            response,
+            ("s3Location", "s3_location", "location", "path", "uri"),
+        )
+        if location is None:
+            raise ConfigError("Milvus describe snapshot response did not include s3Location")
+        return MilvusSnapshotLocation(name=snapshot_name, location=str(location))
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = self._create_client()
+        return self._client
+
+    def _create_client(self):
+        try:
+            from pymilvus import MilvusClient
+        except ImportError as exc:
+            raise ConfigError(
+                "PyMilvus is required for Milvus service access. "
+                "Install it with `pip install pymilvus` or `pip install ray-milvus[pymilvus]`."
+            ) from exc
+
+        kwargs: dict[str, str] = {}
+        if self.token is not None:
+            kwargs["token"] = self.token
+        if self.user is not None:
+            kwargs["user"] = self.user
+        if self.password is not None:
+            kwargs["password"] = self.password
+        if self.db_name is not None:
+            kwargs["db_name"] = self.db_name
+        return MilvusClient(uri=self.uri, **kwargs)
 
 
 def load_collection_schema(
@@ -22,18 +128,13 @@ def load_collection_schema(
     password: str | None = None,
     db_name: str | None = None,
 ) -> dict[str, Any]:
-    try:
-        client = _create_milvus_client(
-            uri=uri,
-            token=token,
-            user=user,
-            password=password,
-            db_name=db_name,
-        )
-        schema = client.describe_collection(collection_name=collection_name)
-    except Exception as exc:  # noqa: BLE001
-        raise ConfigError(f"Failed to load Milvus collection schema: {exc}") from exc
-    return normalize_collection_schema(schema, collection_name=collection_name)
+    return MilvusService(
+        uri=uri,
+        token=token,
+        user=user,
+        password=password,
+        db_name=db_name,
+    ).load_collection_schema(collection_name)
 
 
 def create_snapshot_for_read(
@@ -47,73 +148,39 @@ def create_snapshot_for_read(
     description: str | None = None,
     compaction_protection_seconds: int | None = None,
 ) -> MilvusSnapshotLocation:
-    client = _create_milvus_client(
+    return MilvusService(
         uri=uri,
         token=token,
         user=user,
         password=password,
         db_name=db_name,
+    ).create_snapshot_for_read(
+        collection_name=collection_name,
+        snapshot_name=snapshot_name,
+        description=description,
+        compaction_protection_seconds=compaction_protection_seconds,
     )
-    create_method = _required_method(client, ("create_snapshot", "createSnapshot"))
-    describe_method = _required_method(client, ("describe_snapshot", "describeSnapshot"))
-    create_kwargs = {
-        "snapshot_name": snapshot_name,
-        "collection_name": collection_name,
-    }
-    if db_name is not None:
-        create_kwargs["db_name"] = db_name
-    if description is not None:
-        create_kwargs["description"] = description
-    if compaction_protection_seconds is not None:
-        create_kwargs["compaction_protection_seconds"] = compaction_protection_seconds
-    try:
-        _call_with_fallback(create_method, create_kwargs)
-        response = _call_with_fallback(
-            describe_method,
-            {
-                "snapshot_name": snapshot_name,
-                "collection_name": collection_name,
-                **({"db_name": db_name} if db_name is not None else {}),
-            },
-        )
-    except UnsupportedFeatureError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        raise ConfigError(f"Failed to create Milvus snapshot for read: {exc}") from exc
-    location = _first_value(
-        response,
-        ("s3Location", "s3_location", "location", "path", "uri"),
-    )
-    if location is None:
-        raise ConfigError("Milvus describe snapshot response did not include s3Location")
-    return MilvusSnapshotLocation(name=snapshot_name, location=str(location))
 
 
-def _create_milvus_client(
+def describe_snapshot_for_read(
     uri: str,
-    token: str | None,
-    user: str | None,
-    password: str | None,
-    db_name: str | None,
-):
-    try:
-        from pymilvus import MilvusClient
-    except ImportError as exc:
-        raise ConfigError(
-            "PyMilvus is required for Milvus service access. "
-            "Install it with `pip install pymilvus` or `pip install milvus-toolkit[pymilvus]`."
-        ) from exc
-
-    kwargs: dict[str, str] = {}
-    if token is not None:
-        kwargs["token"] = token
-    if user is not None:
-        kwargs["user"] = user
-    if password is not None:
-        kwargs["password"] = password
-    if db_name is not None:
-        kwargs["db_name"] = db_name
-    return MilvusClient(uri=uri, **kwargs)
+    collection_name: str,
+    snapshot_name: str,
+    token: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    db_name: str | None = None,
+) -> MilvusSnapshotLocation:
+    return MilvusService(
+        uri=uri,
+        token=token,
+        user=user,
+        password=password,
+        db_name=db_name,
+    ).describe_snapshot_for_read(
+        collection_name=collection_name,
+        snapshot_name=snapshot_name,
+    )
 
 
 def _required_method(client: Any, names: tuple[str, ...]):

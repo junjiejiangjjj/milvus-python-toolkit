@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from milvus_toolkit.errors import SchemaError
-from milvus_toolkit.types import FieldSchema, MilvusSchema
+from ray_milvus.errors import SchemaError
+from ray_milvus.types import FieldSchema, MilvusSchema
 
 _SYSTEM_FIELDS = {"RowID", "Timestamp"}
 

@@ -1,6 +1,6 @@
-# Milvus Python Toolkit MVP 规划
+# ray-milvus MVP 规划
 
-本文档定义 Milvus Python Toolkit / Offline SDK 的第一版 MVP 范围。MVP 目标是先完成一个可验证、可测试、可扩展的数据读取闭环，而不是一次性实现完整 Toolkit。
+本文档定义 ray-milvus 的第一版 MVP 范围。MVP 目标是先完成一个可验证、可测试、可扩展的数据读取闭环，而不是一次性实现完整工具集。
 
 ## 1. MVP 目标
 
@@ -41,7 +41,7 @@ MVP 完成后，应能够：
 - Milvus Lite lite-storage adapter。
 - `MilvusDataset.to_arrow()`。
 - `inspect_snapshot(...)` API。
-- `milvus-toolkit inspect` CLI。
+- `ray-milvus inspect` CLI。
 - 单元测试和基础集成测试。
 
 ### 2.2 明确不支持
@@ -70,7 +70,7 @@ MVP 不做以下能力：
 MVP 阶段保持结构紧凑：
 
 ```text
-milvus_toolkit/
+ray_milvus/
   __init__.py
   api.py
   types.py
@@ -115,9 +115,9 @@ MVP 阶段暂不创建 `ops/`。Backfill、transform、validate、migrate、repa
 ### 4.1 读取 snapshot
 
 ```python
-import milvus_toolkit as mt
+import ray_milvus as rm
 
-storage = mt.MilvusStorageConfig(
+storage = rm.StorageConfig(
     endpoint="localhost:9000",
     bucket="bucket",
     access_key="minioadmin",
@@ -126,9 +126,9 @@ storage = mt.MilvusStorageConfig(
 )
 
 # Milvus Lite 使用同一个上层 API，只替换 storage config：
-# storage = mt.MilvusLiteStorageConfig(path="/path/to/milvus_lite.db")
+# storage = rm.StorageConfig(path="/path/to/milvus_lite.db")
 
-dataset = mt.read_snapshot(
+dataset = rm.read_snapshot(
     snapshot_path="s3://bucket/snapshots/foo.json",
     storage=storage,
     columns=["id", "vector"],
@@ -141,9 +141,9 @@ table = dataset.to_arrow()
 ### 4.2 Inspection API
 
 ```python
-import milvus_toolkit as mt
+import ray_milvus as rm
 
-info = mt.inspect_snapshot(
+info = rm.inspect_snapshot(
     snapshot_path="s3://bucket/snapshots/foo.json",
     storage=storage,
 )
@@ -156,7 +156,7 @@ print(info.segments)
 MVP 必须支持：
 
 ```bash
-milvus-toolkit inspect \
+ray-milvus inspect \
   --snapshot s3://bucket/snapshots/foo.json \
   --s3-endpoint localhost:9000 \
   --s3-bucket bucket \
@@ -167,7 +167,7 @@ milvus-toolkit inspect \
 可选支持：
 
 ```bash
-milvus-toolkit read \
+ray-milvus read \
   --snapshot s3://bucket/snapshots/foo.json \
   --columns id,vector \
   --output /tmp/out.arrow
@@ -430,9 +430,9 @@ MVP 完成时必须满足：
 
 1. `pip install -e .` 成功。
 2. `pytest` 成功。
-3. `milvus-toolkit inspect ...` 能输出 snapshot / schema / segment / manifest 信息。
-4. `mt.inspect_snapshot(...)` 可用。
-5. `mt.read_snapshot(...).to_arrow()` 可用。
+3. `ray-milvus inspect ...` 能输出 snapshot / schema / segment / manifest 信息。
+4. `rm.inspect_snapshot(...)` 可用。
+5. `rm.read_snapshot(...).to_arrow()` 可用。
 6. 能通过统一 `StorageReader` 读取 Milvus StorageV3 manifest-backed segment。
 7. 能通过同一上层读取路径接入 Milvus Lite storage reader。
 8. 遇到非支持数据明确报错。

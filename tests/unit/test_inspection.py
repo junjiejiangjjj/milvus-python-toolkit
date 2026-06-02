@@ -1,6 +1,6 @@
 from pathlib import Path
 
-import milvus_toolkit as mt
+import ray_milvus as mt
 
 FIXTURES = Path(__file__).parents[1] / "fixtures"
 

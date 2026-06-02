@@ -5,9 +5,9 @@ from types import ModuleType
 
 import pytest
 
-from milvus_toolkit.core.inspection import inspect_snapshot_metadata
-from milvus_toolkit.core.native_snapshot import build_snapshot_payload_from_native_snapshot
-from milvus_toolkit.errors import ConfigError, SnapshotError
+from ray_milvus.core.inspection import inspect_snapshot_metadata
+from ray_milvus.core.native_snapshot import build_snapshot_payload_from_native_snapshot
+from ray_milvus.errors import ConfigError, SnapshotError
 
 FIXTURE_ROOT = Path(__file__).parents[1] / "fixtures" / "native_snapshot"
 METADATA = FIXTURE_ROOT / "123" / "metadata" / "456.json"

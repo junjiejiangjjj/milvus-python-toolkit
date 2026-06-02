@@ -17,7 +17,7 @@
       "segment_id": 20,
       "partition_id": 1,
       "row_count": 1,
-      "storage_version": "PackedParquet",
+      "storage_version": "StorageV1",
       "manifest_path": "segments/20/data.parquet",
       "manifest_version": "legacy"
     }

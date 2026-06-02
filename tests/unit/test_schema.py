@@ -1,7 +1,7 @@
 import pytest
 
-from milvus_toolkit.core.schema import parse_schema, project_fields
-from milvus_toolkit.errors import SchemaError
+from ray_milvus.core.schema import parse_schema, project_fields
+from ray_milvus.errors import SchemaError
 
 
 def test_parse_schema_and_project_fields():

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from milvus_toolkit.errors import ManifestError, UnsupportedSegmentError
-from milvus_toolkit.types import SegmentMetadata
+from ray_milvus.errors import ManifestError, UnsupportedSegmentError
+from ray_milvus.types import SegmentMetadata
 
-_STORAGE_V3_VALUES = {"storagev3", "storage_v3", "v3", "3"}
+_STORAGE_V3_VALUES = {"storagev3", "storage_v3", "v3", "3", "packedparquet", "packed_parquet"}
 
 
 def validate_storage_v3_manifest(segment: SegmentMetadata) -> None:
