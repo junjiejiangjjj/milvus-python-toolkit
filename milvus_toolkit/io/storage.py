@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Protocol
@@ -68,12 +69,18 @@ class MilvusStorageReader:
         transaction_path = _transaction_path(task.manifest_path)
 
         try:
-            with milvus_storage.Transaction(transaction_path, properties=properties) as transaction:
-                manifest = _get_manifest(
-                    transaction,
-                    task.manifest_version,
-                )
-            column_groups = milvus_storage.ColumnGroups.from_list(manifest.column_groups)
+            if task.segment.raw.get("legacy_binlog_manifest"):
+                return _read_legacy_binlog_segment(task, properties)
+            else:
+                with milvus_storage.Transaction(
+                    transaction_path,
+                    properties=properties,
+                ) as transaction:
+                    manifest = _get_manifest(
+                        transaction,
+                        task.manifest_version,
+                    )
+                column_groups = milvus_storage.ColumnGroups.from_list(manifest.column_groups)
             with milvus_storage.Reader(
                 column_groups,
                 schema,
@@ -168,6 +175,134 @@ class MilvusLiteStorageWriter:
 
 
 MilvusStorageAdapter = MilvusStorageReader
+
+
+def _read_legacy_binlog_segment(task: SegmentReadTask, properties: dict[str, str]) -> pa.Table:
+    if task.segment.manifest_path is None:
+        raise StorageError("Legacy binlog snapshot segment must include manifest_path")
+    arrays = {}
+    row_count = 0
+    for field in task.projected_fields:
+        field_path = task.segment.raw.get("field_path_aliases", {}).get(
+            str(field.field_id),
+            str(field.field_id),
+        )
+        table = _read_legacy_binlog_field(
+            task.segment.manifest_path,
+            field_path,
+            field,
+            properties,
+        )
+        row_count = max(row_count, table.num_rows)
+        arrays[field.name] = table[field.name]
+    if not arrays:
+        return pa.table({})
+    return pa.table(arrays)
+
+
+
+def _read_legacy_binlog_field(
+    manifest_path: str,
+    field_path: str,
+    field: FieldSchema,
+    properties: dict[str, str],
+) -> pa.Table:
+    import pyarrow.parquet as pq
+
+    filesystem, path_prefix = _legacy_binlog_filesystem(properties)
+    selector = pa.fs.FileSelector(
+        f"{path_prefix}/{manifest_path}/{field_path}",
+        recursive=False,
+    )
+    file_infos = [info for info in filesystem.get_file_info(selector) if info.is_file]
+    if not file_infos:
+        raise StorageError(
+            f"Legacy binlog field {field.name} has no files at {manifest_path}/{field_path}"
+        )
+    tables = []
+    for file_info in sorted(file_infos, key=lambda info: info.path):
+        with filesystem.open_input_file(file_info.path) as file_obj:
+            table = pq.read_table(file_obj)
+        tables.append(_coerce_legacy_binlog_field_table(table, field))
+    return pa.concat_tables(tables) if len(tables) > 1 else tables[0]
+
+
+
+def _legacy_binlog_filesystem(properties: dict[str, str]):
+    storage_type = properties.get("fs.storage_type")
+    if storage_type == "local":
+        return pa.fs.LocalFileSystem(), properties.get("fs.root_path", "")
+    if storage_type == "remote":
+        options = {
+            "endpoint_override": properties.get("fs.address"),
+            "scheme": "https" if properties.get("fs.use_ssl", "true") == "true" else "http",
+        }
+        if properties.get("fs.access_key_id") is not None:
+            options["access_key"] = properties["fs.access_key_id"]
+        if properties.get("fs.access_key_value") is not None:
+            options["secret_key"] = properties["fs.access_key_value"]
+        if properties.get("fs.region") is not None:
+            options["region"] = properties["fs.region"]
+        bucket = properties.get("fs.bucket_name")
+        if bucket is None:
+            raise StorageError("Remote legacy binlog storage requires fs.bucket_name")
+        return pa.fs.S3FileSystem(**options), bucket
+    raise StorageError(f"Unsupported legacy binlog storage type: {storage_type}")
+
+
+
+def _coerce_legacy_binlog_field_table(table: pa.Table, field: FieldSchema) -> pa.Table:
+    if field.name not in table.column_names:
+        raise StorageError(f"Legacy binlog file missing column {field.name}")
+    column = table[field.name]
+    if field.data_type.replace("_", "").lower() == "floatvector":
+        column = _fixed_size_binary_to_float_vector(column, field)
+    else:
+        column = column.cast(_to_pyarrow_type(field))
+    return pa.table({field.name: column})
+
+
+
+def _fixed_size_binary_to_float_vector(column: pa.ChunkedArray, field: FieldSchema) -> pa.Array:
+    dim = int(field.params.get("dim", 0))
+    if dim <= 0:
+        raise StorageError(f"FloatVector field {field.name} requires dim param")
+    values = []
+    for value in column.to_pylist():
+        if value is None:
+            values.append(None)
+        else:
+            values.append(list(struct.unpack(f"<{dim}f", value)))
+    return pa.array(values, type=pa.list_(pa.float32()))
+
+
+
+def _legacy_binlog_column_groups(
+    milvus_storage,
+    manifest_path: str | None,
+    fields,
+    field_path_aliases: dict[str, str],
+):
+    if manifest_path is None:
+        raise StorageError("Legacy binlog snapshot segment must include manifest_path")
+    column_groups = []
+    for field in fields:
+        field_path = field_path_aliases.get(str(field.field_id), str(field.field_id))
+        column_groups.append(
+            milvus_storage.ColumnGroup(
+                columns=[field.name],
+                format="parquet",
+                files=[
+                    milvus_storage.ColumnGroupFile(
+                        f"{manifest_path}/{field_path}/",
+                        0,
+                        2**63 - 1,
+                    )
+                ],
+            )
+        )
+    return milvus_storage.ColumnGroups.from_list(column_groups)
+
 
 
 def _load_milvus_storage():

@@ -1,10 +1,17 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from milvus_toolkit.core.schema import parse_schema
-from milvus_toolkit.errors import ConfigError, SchemaError
+from milvus_toolkit.errors import ConfigError, SchemaError, UnsupportedFeatureError
+
+
+@dataclass(frozen=True)
+class MilvusSnapshotLocation:
+    name: str
+    location: str
 
 
 def load_collection_schema(
@@ -16,10 +23,84 @@ def load_collection_schema(
     db_name: str | None = None,
 ) -> dict[str, Any]:
     try:
+        client = _create_milvus_client(
+            uri=uri,
+            token=token,
+            user=user,
+            password=password,
+            db_name=db_name,
+        )
+        schema = client.describe_collection(collection_name=collection_name)
+    except Exception as exc:  # noqa: BLE001
+        raise ConfigError(f"Failed to load Milvus collection schema: {exc}") from exc
+    return normalize_collection_schema(schema, collection_name=collection_name)
+
+
+def create_snapshot_for_read(
+    uri: str,
+    collection_name: str,
+    snapshot_name: str,
+    token: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    db_name: str | None = None,
+    description: str | None = None,
+    compaction_protection_seconds: int | None = None,
+) -> MilvusSnapshotLocation:
+    client = _create_milvus_client(
+        uri=uri,
+        token=token,
+        user=user,
+        password=password,
+        db_name=db_name,
+    )
+    create_method = _required_method(client, ("create_snapshot", "createSnapshot"))
+    describe_method = _required_method(client, ("describe_snapshot", "describeSnapshot"))
+    create_kwargs = {
+        "snapshot_name": snapshot_name,
+        "collection_name": collection_name,
+    }
+    if db_name is not None:
+        create_kwargs["db_name"] = db_name
+    if description is not None:
+        create_kwargs["description"] = description
+    if compaction_protection_seconds is not None:
+        create_kwargs["compaction_protection_seconds"] = compaction_protection_seconds
+    try:
+        _call_with_fallback(create_method, create_kwargs)
+        response = _call_with_fallback(
+            describe_method,
+            {
+                "snapshot_name": snapshot_name,
+                "collection_name": collection_name,
+                **({"db_name": db_name} if db_name is not None else {}),
+            },
+        )
+    except UnsupportedFeatureError:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise ConfigError(f"Failed to create Milvus snapshot for read: {exc}") from exc
+    location = _first_value(
+        response,
+        ("s3Location", "s3_location", "location", "path", "uri"),
+    )
+    if location is None:
+        raise ConfigError("Milvus describe snapshot response did not include s3Location")
+    return MilvusSnapshotLocation(name=snapshot_name, location=str(location))
+
+
+def _create_milvus_client(
+    uri: str,
+    token: str | None,
+    user: str | None,
+    password: str | None,
+    db_name: str | None,
+):
+    try:
         from pymilvus import MilvusClient
     except ImportError as exc:
         raise ConfigError(
-            "PyMilvus is required for --schema-from-milvus. "
+            "PyMilvus is required for Milvus service access. "
             "Install it with `pip install pymilvus` or `pip install milvus-toolkit[pymilvus]`."
         ) from exc
 
@@ -32,13 +113,34 @@ def load_collection_schema(
         kwargs["password"] = password
     if db_name is not None:
         kwargs["db_name"] = db_name
+    return MilvusClient(uri=uri, **kwargs)
 
+
+def _required_method(client: Any, names: tuple[str, ...]):
+    for name in names:
+        method = getattr(client, name, None)
+        if callable(method):
+            return method
+    raise UnsupportedFeatureError(
+        "PyMilvus client does not expose Milvus snapshot APIs: "
+        f"expected one of {', '.join(names)}"
+    )
+
+
+def _call_with_fallback(method, kwargs: dict[str, Any]):
     try:
-        client = MilvusClient(uri=uri, **kwargs)
-        schema = client.describe_collection(collection_name=collection_name)
-    except Exception as exc:  # noqa: BLE001
-        raise ConfigError(f"Failed to load Milvus collection schema: {exc}") from exc
-    return normalize_collection_schema(schema, collection_name=collection_name)
+        return method(**kwargs)
+    except TypeError:
+        fallback = dict(kwargs)
+        if "collection_name" in fallback:
+            fallback["collectionName"] = fallback.pop("collection_name")
+        if "db_name" in fallback:
+            fallback["dbName"] = fallback.pop("db_name")
+        if "compaction_protection_seconds" in fallback:
+            fallback["compactionProtectionSeconds"] = fallback.pop(
+                "compaction_protection_seconds"
+            )
+        return method(**fallback)
 
 
 def normalize_collection_schema(schema: Any, collection_name: str | None = None) -> dict[str, Any]:

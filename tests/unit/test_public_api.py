@@ -15,6 +15,7 @@ def test_public_api_exports_mvp_symbols():
     assert mt.read_snapshot is not None
     assert mt.create_snapshot is not None
     assert mt.create_snapshot_from_milvus is not None
+    assert mt.create_snapshot_from_milvus_snapshot is not None
     assert mt.import_milvus_snapshot is not None
     assert mt.inspect_snapshot is not None
     assert mt.write_segment is not None
@@ -58,6 +59,94 @@ def test_create_snapshot_from_files_and_overwrite_guard(tmp_path):
     with pytest.raises(mt.ConfigError, match="already exists"):
         mt.create_snapshot(schema_path, segments_path, output_path=output_path)
     mt.create_snapshot(schema_path, segments_path, output_path=output_path, overwrite=True)
+
+
+def test_create_snapshot_from_milvus_snapshot_uses_snapshot_location(monkeypatch, tmp_path):
+    output_path = tmp_path / "snapshot.json"
+
+    def create_snapshot_for_read(**kwargs):
+        assert kwargs["uri"] == "http://localhost:19530"
+        assert kwargs["collection_name"] == "demo_collection"
+        assert kwargs["snapshot_name"] == "snapshot-1"
+        return type("SnapshotLocation", (), {"location": "s3://bucket/snapshot.json"})()
+
+    def load_snapshot_json(path):
+        assert path == "s3://bucket/snapshot.json"
+        return {
+            "collection": {
+                "name": "demo_collection",
+                "schema": {
+                    "name": "demo_collection",
+                    "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+                },
+            },
+            "storagev2_manifest_list": [
+                {
+                    "segmentID": 10,
+                    "manifest": json.dumps({"ver": 1, "base_path": "files/insert_log/1/2/10"}),
+                }
+            ],
+        }
+
+    monkeypatch.setattr("milvus_toolkit.api.create_snapshot_for_read", create_snapshot_for_read)
+    monkeypatch.setattr("milvus_toolkit.api.load_snapshot_json", load_snapshot_json)
+
+    payload = mt.create_snapshot_from_milvus_snapshot(
+        "http://localhost:19530",
+        "demo_collection",
+        "snapshot-1",
+        output_path=output_path,
+    )
+
+    assert payload["segments"][0]["manifest_path"] == "files/insert_log/1/2/10"
+    written = json.loads(output_path.read_text(encoding="utf-8"))
+    assert written["collection_name"] == "demo_collection"
+
+
+
+def test_create_snapshot_from_milvus_snapshot_uses_storage_for_relative_location(
+    monkeypatch,
+    tmp_path,
+):
+    output_path = tmp_path / "snapshot.json"
+
+    def create_snapshot_for_read(**kwargs):
+        assert kwargs["uri"] == "http://localhost:19530"
+        return type("SnapshotLocation", (), {"location": "files/snapshot.json"})()
+
+    def load_snapshot_json_from_storage(path, **kwargs):
+        assert path == "files/snapshot.json"
+        assert kwargs["storage_type"] == "s3"
+        assert kwargs["endpoint"] == "localhost:9000"
+        assert kwargs["bucket"] == "a-bucket"
+        return {
+            "collection_schema": {
+                "name": "demo_collection",
+                "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+            },
+            "segments": [{"segment_id": 10, "manifest_path": "files/insert_log/1/2/10"}],
+        }
+
+    monkeypatch.setattr("milvus_toolkit.api.create_snapshot_for_read", create_snapshot_for_read)
+    monkeypatch.setattr(
+        "milvus_toolkit.api.load_snapshot_json_from_storage",
+        load_snapshot_json_from_storage,
+    )
+
+    payload = mt.create_snapshot_from_milvus_snapshot(
+        "http://localhost:19530",
+        "demo_collection",
+        "snapshot-1",
+        output_path=output_path,
+        storage=mt.StorageConfig(
+            storage_type="s3",
+            endpoint="localhost:9000",
+            bucket="a-bucket",
+        ),
+    )
+
+    assert payload["segments"][0]["manifest_path"] == "files/insert_log/1/2/10"
+
 
 
 def test_create_snapshot_from_milvus_uses_loaded_schema(monkeypatch, tmp_path):

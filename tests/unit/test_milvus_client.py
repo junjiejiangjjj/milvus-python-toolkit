@@ -3,8 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from milvus_toolkit.errors import ConfigError
-from milvus_toolkit.io.milvus_client import load_collection_schema, normalize_collection_schema
+from milvus_toolkit.errors import ConfigError, UnsupportedFeatureError
+from milvus_toolkit.io.milvus_client import (
+    create_snapshot_for_read,
+    load_collection_schema,
+    normalize_collection_schema,
+)
 
 
 def test_normalize_collection_schema_from_dict_shape():
@@ -90,3 +94,61 @@ def test_load_collection_schema_reports_missing_pymilvus(monkeypatch):
 
     with pytest.raises(ConfigError, match="PyMilvus is required"):
         load_collection_schema("http://localhost:19530", "demo_collection")
+
+
+
+def test_create_snapshot_for_read_returns_s3_location(monkeypatch):
+    calls = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            calls.append(("init", kwargs))
+
+        def create_snapshot(self, **kwargs):
+            calls.append(("create", kwargs))
+            return {"status": "ok"}
+
+        def describe_snapshot(self, **kwargs):
+            calls.append(("describe", kwargs))
+            return {"s3Location": "s3://bucket/snapshots/demo.json"}
+
+    monkeypatch.setitem(
+        sys.modules,
+        "pymilvus",
+        SimpleNamespace(MilvusClient=lambda **kwargs: FakeClient(**kwargs)),
+    )
+
+    location = create_snapshot_for_read(
+        "http://localhost:19530",
+        "demo_collection",
+        "snapshot-1",
+        token="secret",
+        db_name="default",
+        compaction_protection_seconds=60,
+    )
+
+    assert location.name == "snapshot-1"
+    assert location.location == "s3://bucket/snapshots/demo.json"
+    assert calls[0] == (
+        "init",
+        {"uri": "http://localhost:19530", "token": "secret", "db_name": "default"},
+    )
+    assert calls[1][1]["snapshot_name"] == "snapshot-1"
+    assert calls[1][1]["collection_name"] == "demo_collection"
+    assert calls[1][1]["compaction_protection_seconds"] == 60
+
+
+
+def test_create_snapshot_for_read_reports_missing_api(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "pymilvus",
+        SimpleNamespace(MilvusClient=lambda **kwargs: SimpleNamespace()),
+    )
+
+    with pytest.raises(UnsupportedFeatureError, match="snapshot APIs"):
+        create_snapshot_for_read(
+            "http://localhost:19530",
+            "demo_collection",
+            "snapshot-1",
+        )

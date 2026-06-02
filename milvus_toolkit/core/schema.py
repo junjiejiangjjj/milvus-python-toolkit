@@ -5,6 +5,8 @@ from typing import Any
 from milvus_toolkit.errors import SchemaError
 from milvus_toolkit.types import FieldSchema, MilvusSchema
 
+_SYSTEM_FIELDS = {"RowID", "Timestamp"}
+
 
 def parse_schema(data: dict[str, Any]) -> MilvusSchema:
     schema_data = data.get("collection_schema", data)
@@ -19,7 +21,9 @@ def parse_schema(data: dict[str, Any]) -> MilvusSchema:
             raise SchemaError("Schema field entries must be objects")
         name = field_data.get("name")
         field_id = field_data.get("field_id", field_data.get("fieldID"))
-        data_type = field_data.get("data_type", field_data.get("dataType"))
+        data_type = field_data.get("data_type", field_data.get("dataType", field_data.get("type")))
+        if name in _SYSTEM_FIELDS and field_id is None:
+            continue
         if not name or field_id is None or data_type is None:
             raise SchemaError("Schema fields must include name, field_id, and data_type")
         fields.append(
@@ -29,11 +33,25 @@ def parse_schema(data: dict[str, Any]) -> MilvusSchema:
                 data_type=str(data_type),
                 is_primary=bool(field_data.get("is_primary", field_data.get("isPrimary", False))),
                 nullable=bool(field_data.get("nullable", True)),
-                params=dict(field_data.get("params", {})),
+                params=_field_params(field_data),
             )
         )
 
     return MilvusSchema(collection_name=collection_name, fields=tuple(fields))
+
+
+
+def _field_params(field_data: dict[str, Any]) -> dict[str, Any]:
+    params = dict(field_data.get("params", {}) or {})
+    type_params = field_data.get("type_params")
+    if isinstance(type_params, dict):
+        params.update(type_params)
+    elif isinstance(type_params, list):
+        for item in type_params:
+            if isinstance(item, dict) and "key" in item and "value" in item:
+                params[str(item["key"])] = item["value"]
+    return params
+
 
 
 def project_fields(

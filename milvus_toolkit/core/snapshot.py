@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any
 
@@ -74,6 +75,13 @@ def _parse_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
                     if isinstance(segment, dict) and "partition_id" not in segment:
                         segment = {**segment, "partition_id": partition_id}
                     raw_segments.append(segment)
+        if not raw_segments:
+            manifest_segments = _parse_storage_v3_manifest_segments(data)
+            if manifest_segments:
+                return manifest_segments
+            legacy_manifest_segments = _parse_legacy_manifest_segments(data)
+            if legacy_manifest_segments:
+                return legacy_manifest_segments
 
     if not isinstance(raw_segments, list):
         raise SnapshotError("Snapshot segments must be a list")
@@ -104,10 +112,177 @@ def _parse_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
                 manifest_version=_optional_str(
                     segment_data.get("manifest_version") or manifest.get("version")
                 ),
-                raw=segment_data,
+                raw={
+                    **segment_data,
+                    **(
+                        {"legacy_binlog_manifest": True}
+                        if segment_data.get("legacy_binlog_manifest")
+                        else {}
+                    ),
+                    **(
+                        {"field_path_aliases": segment_data.get("field_path_aliases")}
+                        if segment_data.get("field_path_aliases")
+                        else {}
+                    ),
+                },
             )
         )
     return segments
+
+
+def _parse_storage_v3_manifest_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
+    raw_items = data.get("storagev2_manifest_list", data.get("storagev2-manifest-list"))
+    if raw_items is None:
+        return []
+    if not isinstance(raw_items, list):
+        raise SnapshotError("Snapshot storagev2_manifest_list must be a list")
+
+    segments = []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            raise SnapshotError("Snapshot storagev2_manifest_list entries must be objects")
+        segment_id = item.get("segmentID", item.get("segment_id"))
+        if segment_id is None:
+            raise SnapshotError("Snapshot storagev2_manifest_list entries must include segmentID")
+        manifest_content = _parse_manifest_content(item.get("manifest"), segment_id)
+        base_path = manifest_content.get("base_path", manifest_content.get("basePath"))
+        if base_path is None:
+            raise SnapshotError(
+                f"Snapshot manifest for segment {segment_id} must include base_path"
+            )
+        version = manifest_content.get("version", manifest_content.get("ver"))
+        segments.append(
+            SegmentMetadata(
+                segment_id=int(segment_id),
+                partition_id=_optional_int(
+                    item.get("partition_id")
+                    or item.get("partitionID")
+                    or _partition_id_from_base_path(str(base_path))
+                ),
+                row_count=_optional_int(
+                    item.get("row_count")
+                    or item.get("rowCount")
+                    or item.get("num_rows")
+                    or item.get("numRows")
+                    or item.get("num_of_rows")
+                ),
+                storage_version="StorageV3",
+                manifest_path=str(base_path),
+                manifest_version=None if version is None else str(version),
+                raw=item,
+            )
+        )
+    return segments
+
+
+def _parse_legacy_manifest_segments(data: dict[str, Any]) -> list[SegmentMetadata]:
+    manifest_paths = data.get("manifest_list")
+    segment_ids = data.get("segment_ids")
+    if manifest_paths is None:
+        return []
+    if not isinstance(manifest_paths, list):
+        raise SnapshotError("Snapshot manifest_list must be a list")
+    if segment_ids is not None and not isinstance(segment_ids, list):
+        raise SnapshotError("Snapshot segment_ids must be a list")
+
+    segments = []
+    collection_id = _optional_str(data.get("snapshot_info", {}).get("collection_id"))
+    partition_id = _first_string(data.get("snapshot_info", {}).get("partition_ids"))
+    for index, manifest_path in enumerate(manifest_paths):
+        segment_id = None if segment_ids is None else segment_ids[index]
+        if segment_id is None:
+            segment_id = _segment_id_from_manifest_path(str(manifest_path))
+        if segment_id is None:
+            raise SnapshotError("Snapshot manifest_list entries require matching segment_ids")
+        segments.append(
+            SegmentMetadata(
+                segment_id=int(segment_id),
+                partition_id=_optional_int(partition_id),
+                row_count=None,
+                storage_version="StorageV3",
+                manifest_path=_transaction_path_from_manifest_path(
+                    str(manifest_path),
+                    collection_id=collection_id,
+                    partition_id=partition_id,
+                    segment_id=str(segment_id),
+                ),
+                manifest_version=None,
+                raw={
+                    "manifest_path": manifest_path,
+                    "legacy_binlog_manifest": True,
+                    "field_path_aliases": {"100": "0", "1": "1"},
+                },
+            )
+        )
+    return segments
+
+
+
+def _segment_id_from_manifest_path(manifest_path: str) -> str | None:
+    stem = manifest_path.rsplit("/", 1)[-1].removesuffix(".avro")
+    return stem or None
+
+
+
+def _transaction_path_from_manifest_path(
+    manifest_path: str,
+    collection_id: str | None,
+    partition_id: str | None,
+    segment_id: str,
+) -> str:
+    parts = manifest_path.split("/")
+    if collection_id is not None and partition_id is not None:
+        try:
+            snapshots_index = parts.index("snapshots")
+            prefix = parts[:snapshots_index]
+        except ValueError:
+            prefix = []
+        return "/".join([*prefix, "insert_log", collection_id, partition_id, segment_id])
+    try:
+        manifests_index = parts.index("manifests")
+    except ValueError:
+        return manifest_path
+    if manifests_index < 2 or manifests_index + 2 >= len(parts):
+        return manifest_path
+    collection_id = parts[manifests_index - 1]
+    return "/".join([*parts[: manifests_index - 2], "insert_log", collection_id, segment_id])
+
+
+
+def _first_string(values: Any) -> str | None:
+    if isinstance(values, list) and values:
+        return str(values[0])
+    if values is None:
+        return None
+    return str(values)
+
+
+
+def _parse_manifest_content(value: Any, segment_id: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise SnapshotError(
+                f"Snapshot manifest for segment {segment_id} is not valid JSON"
+            ) from exc
+        if isinstance(decoded, dict):
+            return decoded
+    raise SnapshotError(f"Snapshot manifest for segment {segment_id} must be an object")
+
+
+def _partition_id_from_base_path(base_path: str) -> int | None:
+    parts = base_path.split("/")
+    try:
+        insert_log_index = parts.index("insert_log")
+    except ValueError:
+        return None
+    if insert_log_index + 2 >= len(parts):
+        return None
+    return int(parts[insert_log_index + 2])
+
 
 
 def _canonical_schema_data(
@@ -155,6 +330,16 @@ def _canonical_segments_data(
             "storage_version": segment.storage_version,
             "manifest_path": segment.manifest_path,
             "manifest_version": segment.manifest_version,
+            **(
+                {"legacy_binlog_manifest": True}
+                if segment.raw.get("legacy_binlog_manifest")
+                else {}
+            ),
+            **(
+                {"field_path_aliases": segment.raw.get("field_path_aliases")}
+                if segment.raw.get("field_path_aliases")
+                else {}
+            ),
         }
         for segment in parsed_segments
     ]

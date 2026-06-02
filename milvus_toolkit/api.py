@@ -12,11 +12,11 @@ from milvus_toolkit.core.inspection import inspect_snapshot_metadata
 from milvus_toolkit.core.native_snapshot import build_snapshot_payload_from_native_snapshot
 from milvus_toolkit.core.planner import plan_snapshot_read
 from milvus_toolkit.core.schema import parse_schema
-from milvus_toolkit.core.snapshot import build_snapshot_payload
+from milvus_toolkit.core.snapshot import build_snapshot_payload, parse_snapshot
 from milvus_toolkit.engines.local import execute_read_plan
 from milvus_toolkit.errors import ConfigError
-from milvus_toolkit.io.milvus_client import load_collection_schema
-from milvus_toolkit.io.object_store import load_snapshot_json
+from milvus_toolkit.io.milvus_client import create_snapshot_for_read, load_collection_schema
+from milvus_toolkit.io.object_store import load_snapshot_json, load_snapshot_json_from_storage
 from milvus_toolkit.io.storage import create_storage_reader, create_storage_writer
 from milvus_toolkit.types import FieldSchema, InspectionResult, ReadOptions, StorageConfig
 
@@ -97,6 +97,65 @@ def create_snapshot_from_milvus(
         overwrite=overwrite,
         pretty=pretty,
     )
+
+
+def create_snapshot_from_milvus_snapshot(
+    uri: str,
+    collection_name: str,
+    snapshot_name: str,
+    output_path: str | Path | None = None,
+    storage: StorageConfig | None = None,
+    token: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+    db_name: str | None = None,
+    description: str | None = None,
+    compaction_protection_seconds: int | None = None,
+    overwrite: bool = False,
+    pretty: bool = True,
+) -> dict[str, Any]:
+    snapshot_location = create_snapshot_for_read(
+        uri=uri,
+        collection_name=collection_name,
+        snapshot_name=snapshot_name,
+        token=token,
+        user=user,
+        password=password,
+        db_name=db_name,
+        description=description,
+        compaction_protection_seconds=compaction_protection_seconds,
+    )
+    snapshot_data = _load_milvus_snapshot_json(snapshot_location.location, storage)
+    snapshot = parse_snapshot(snapshot_data)
+    payload = build_snapshot_payload(
+        {"collection_schema": snapshot.schema_data, "collection_name": snapshot.collection_name},
+        [
+            {
+                "segment_id": segment.segment_id,
+                "partition_id": segment.partition_id,
+                "row_count": segment.row_count,
+                "storage_version": segment.storage_version,
+                "manifest_path": segment.manifest_path,
+                "manifest_version": segment.manifest_version,
+                **(
+                    {"legacy_binlog_manifest": True}
+                    if segment.raw.get("legacy_binlog_manifest")
+                    else {}
+                ),
+                **(
+                    {"field_path_aliases": segment.raw.get("field_path_aliases")}
+                    if segment.raw.get("field_path_aliases")
+                    else {}
+                ),
+            }
+            for segment in snapshot.segments
+        ],
+        collection_name=collection_name or snapshot.collection_name,
+    )
+    if output_path is not None:
+        _write_snapshot_payload(payload, Path(output_path), overwrite=overwrite, pretty=pretty)
+    return payload
+
 
 
 def import_milvus_snapshot(
@@ -254,6 +313,25 @@ def backfill_snapshot(
         mode="addfield",
         overwrite=overwrite,
         pretty=pretty,
+    )
+
+
+
+def _load_milvus_snapshot_json(
+    snapshot_location: str,
+    storage: StorageConfig | None,
+) -> dict[str, Any]:
+    if storage is None or snapshot_location.startswith(("s3://", "gs://", "az://")):
+        return load_snapshot_json(snapshot_location)
+    return load_snapshot_json_from_storage(
+        snapshot_location,
+        storage_type=storage.storage_type,
+        endpoint=storage.endpoint,
+        bucket=storage.bucket,
+        access_key=storage.access_key,
+        secret_key=storage.secret_key,
+        use_ssl=storage.use_ssl,
+        region=storage.region,
     )
 
 

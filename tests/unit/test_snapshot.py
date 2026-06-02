@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -79,4 +80,74 @@ def test_build_snapshot_payload_rejects_invalid_segments():
         build_snapshot_payload(
             {"name": "demo", "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}]},
             {"not_segments": []},
+        )
+
+
+
+def test_parse_snapshot_storage_v3_manifest_list():
+    snapshot = parse_snapshot(
+        {
+            "snapshot_info": {"collection_id": 100},
+            "collection": {
+                "name": "demo",
+                "schema": {
+                    "name": "demo",
+                    "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+                },
+            },
+            "storagev2_manifest_list": [
+                {
+                    "segmentID": "300",
+                    "rowCount": "5",
+                    "manifest": json.dumps(
+                        {"ver": 7, "base_path": "files/insert_log/100/200/300"}
+                    ),
+                }
+            ],
+        }
+    )
+
+    assert snapshot.collection_name == "demo"
+    assert snapshot.segments[0].segment_id == 300
+    assert snapshot.segments[0].partition_id == 200
+    assert snapshot.segments[0].row_count == 5
+    assert snapshot.segments[0].storage_version == "StorageV3"
+    assert snapshot.segments[0].manifest_path == "files/insert_log/100/200/300"
+    assert snapshot.segments[0].manifest_version == "7"
+
+
+
+def test_parse_snapshot_legacy_manifest_list_derives_transaction_path():
+    snapshot = parse_snapshot(
+        {
+            "collection_schema": {
+                "name": "demo",
+                "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+            },
+            "snapshot_info": {"collection_id": "100", "partition_ids": ["200"]},
+            "manifest_list": ["files/snapshots/100/manifests/999/300.avro"],
+            "segment_ids": ["300"],
+        }
+    )
+
+    assert snapshot.segments[0].segment_id == 300
+    assert snapshot.segments[0].partition_id == 200
+    assert snapshot.segments[0].storage_version == "StorageV3"
+    assert snapshot.segments[0].manifest_path == "files/insert_log/100/200/300"
+
+
+
+
+def test_parse_snapshot_storage_v3_manifest_rejects_invalid_json():
+    with pytest.raises(SnapshotError, match="not valid JSON"):
+        parse_snapshot(
+            {
+                "collection_schema": {
+                    "name": "demo",
+                    "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+                },
+                "storagev2_manifest_list": [
+                    {"segmentID": 300, "manifest": "not-json"}
+                ],
+            }
         )

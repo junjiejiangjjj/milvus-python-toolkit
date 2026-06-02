@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
         return _create_snapshot(args)
     if args.command == "import-milvus-snapshot":
         return _import_milvus_snapshot(args)
+    if args.command == "create-milvus-snapshot":
+        return _create_milvus_snapshot(args)
     if args.command == "write-segment":
         return _write_segment(args)
     if args.command == "backfill-snapshot":
@@ -78,6 +80,24 @@ def _build_parser() -> argparse.ArgumentParser:
     import_parser.add_argument("--output", required=True)
     import_parser.add_argument("--overwrite", action="store_true")
     import_parser.add_argument("--compact", action="store_true")
+
+    milvus_snapshot_parser = subparsers.add_parser(
+        "create-milvus-snapshot",
+        help="Create a Milvus snapshot and import its S3 metadata into toolkit JSON",
+    )
+    milvus_snapshot_parser.add_argument("--uri", required=True)
+    milvus_snapshot_parser.add_argument("--collection-name", required=True)
+    milvus_snapshot_parser.add_argument("--snapshot-name", required=True)
+    milvus_snapshot_parser.add_argument("--output", required=True)
+    milvus_snapshot_parser.add_argument("--token")
+    milvus_snapshot_parser.add_argument("--user")
+    milvus_snapshot_parser.add_argument("--password")
+    milvus_snapshot_parser.add_argument("--db-name")
+    milvus_snapshot_parser.add_argument("--description")
+    milvus_snapshot_parser.add_argument("--compaction-protection-seconds", type=int)
+    _add_storage_options(milvus_snapshot_parser)
+    milvus_snapshot_parser.add_argument("--overwrite", action="store_true")
+    milvus_snapshot_parser.add_argument("--compact", action="store_true")
 
     write_parser = subparsers.add_parser(
         "write-segment",
@@ -233,6 +253,35 @@ def _import_milvus_snapshot(args: argparse.Namespace) -> int:
     print(
         "Imported Milvus snapshot "
         f"{args.output} for {len(result['segments'])} segment(s)"
+    )
+    return 0
+
+
+
+def _create_milvus_snapshot(args: argparse.Namespace) -> int:
+    try:
+        result = mt.create_snapshot_from_milvus_snapshot(
+            uri=args.uri,
+            collection_name=args.collection_name,
+            snapshot_name=args.snapshot_name,
+            output_path=args.output,
+            storage=_storage_config_from_args(args),
+            token=args.token,
+            user=args.user,
+            password=args.password,
+            db_name=args.db_name,
+            description=args.description,
+            compaction_protection_seconds=args.compaction_protection_seconds,
+            overwrite=args.overwrite,
+            pretty=not args.compact,
+        )
+    except MilvusToolkitError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(
+        "Created Milvus snapshot "
+        f"{args.snapshot_name} and imported {len(result['segments'])} segment(s) to {args.output}"
     )
     return 0
 

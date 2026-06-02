@@ -197,6 +197,51 @@ def test_cli_import_milvus_snapshot(tmp_path, capsys, monkeypatch):
     assert "Imported Milvus snapshot" in output
 
 
+def test_cli_create_milvus_snapshot(tmp_path, capsys, monkeypatch):
+    output_path = tmp_path / "snapshot.json"
+
+    def create_snapshot_from_milvus_snapshot(**kwargs):
+        assert kwargs["uri"] == "http://localhost:19530"
+        assert kwargs["collection_name"] == "demo_collection"
+        assert kwargs["snapshot_name"] == "snapshot-1"
+        assert kwargs["output_path"] == str(output_path)
+        assert kwargs["token"] == "secret"
+        return {
+            "collection_name": "demo_collection",
+            "collection_schema": {
+                "name": "demo_collection",
+                "fields": [{"name": "id", "field_id": 1, "data_type": "Int64"}],
+            },
+            "segments": [{"segment_id": 10}],
+        }
+
+    monkeypatch.setattr(
+        "milvus_toolkit.create_snapshot_from_milvus_snapshot",
+        create_snapshot_from_milvus_snapshot,
+    )
+
+    exit_code = main(
+        [
+            "create-milvus-snapshot",
+            "--uri",
+            "http://localhost:19530",
+            "--collection-name",
+            "demo_collection",
+            "--snapshot-name",
+            "snapshot-1",
+            "--output",
+            str(output_path),
+            "--token",
+            "secret",
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Created Milvus snapshot snapshot-1" in output
+
+
+
 def test_cli_import_milvus_snapshot_requires_structured_ids(tmp_path, capsys):
     exit_code = main(
         [
